@@ -1,0 +1,117 @@
+# Continuous integration for varvig-factory.
+#
+# A cell can spend money, write to a repository, and — once autonomous promotion
+# is enabled for a path — land code without a human reading it. The checks below
+# are what stand between a green PR and any of that going wrong quietly. The
+# guard jobs in particular are not style: each one enforces a prohibition the
+# design states, and each prohibition has an attractive-looking violation.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded run on the same ref is wasted work: cancel it, except on main
+# where every commit's result is worth keeping.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # Read the version from go.mod rather than pinning it twice: the
+          # module's declared version is the one it must build under.
+          go-version-file: go.mod
+          # The module has no third-party dependencies (see the guard below), so
+          # there is nothing to restore and setup-go has no go.sum to key on.
+          cache: false
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt-clean:"
+            echo "$unformatted"
+            gofmt -d $unformatted
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: build
+        run: go build ./...
+
+      - name: test
+        run: go test ./...
+
+      # The budget ledger, the promotion switch and the varvigcli Fake are all
+      # documented as safe for concurrent use, and a cell runs verification jobs
+      # concurrently up to its declared cap. The race detector is the only thing
+      # checking those claims.
+      - name: test (race detector)
+        run: go test -race ./...
+
+      # The nine numbered tests of the spec's §9, called out separately so a
+      # failure in one of them is visible as such in the job list rather than
+      # buried in the full run. They are the tests that hold the properties a
+      # federation depends on: partition duplicates, offline operation,
+      # environment determinism, and the refusals that make autonomy defensible.
+      - name: conformance (spec §9)
+        run: go test -v -run 'Test0[1-9]_' ./conformance/
+
+      # The guards, likewise separate. A failure here means the code has grown
+      # something the design forbids — a second scheduler, a branch on tier, or a
+      # dependency — and the failure message says which.
+      - name: guards
+        run: go test -v ./guard/
+
+      # The runnable demo is documentation that either works or does not. Running
+      # it in CI means the README's "go run ./cmd/factory-demo" cannot rot into an
+      # instruction that fails on a clean checkout.
+      - name: demo
+        run: go run ./cmd/factory-demo
+
+      # The README promises this module has no third-party dependencies, and a
+      # vendor SDK behind an adapter would be the vendor leaking through the seam
+      # the adapter exists to hide. A promise nothing checks is a promise that
+      # drifts, so check it: any require directive, or a go.sum appearing at all,
+      # fails. (The guard package asserts the same thing, so it also fails during
+      # development rather than only at review.)
+      - name: no third-party dependencies
+        run: |
+          if [ -f go.sum ]; then
+            echo "::error file=go.sum::go.sum exists, so something outside the standard library was added"
+            exit 1
+          fi
+          requires=$(go list -m -f '{{if not .Main}}{{.Path}}{{end}}' all)
+          if [ -n "$requires" ]; then
+            echo "::error file=go.mod::this module must stay dependency-free, but it now requires:"
+            echo "$requires"
+            exit 1
+          fi
+
+      # A cell is meant to be one static binary per platform, same discipline as
+      # varvig. Cross-compiling without cgo is the cheapest way to keep that true:
+      # a dependency that needs cgo, or a platform-specific syscall that crept
+      # into a shared file, fails here rather than on somebody's laptop.
+      - name: cross-compile (static, cgo off)
+        env:
+          CGO_ENABLED: 0
+        run: |
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            os=${target%/*}
+            arch=${target#*/}
+            echo "building $os/$arch"
+            GOOS=$os GOARCH=$arch go build -o /dev/null ./cmd/varvig-factory
+          done

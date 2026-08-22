@@ -1,0 +1,5 @@
+# Cell-local operational state: a cell's ledger, claim book and artifact CAS are
+# runtime state, not source. A cell's home directory is chosen by config; these
+# are the defaults.
+.varvig-factory/
+*.wasm
