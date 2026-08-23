@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/varvig/varvig-factory/cell"
 )
 
 // Fake is an in-memory Varvig for tests and the runnable demo. It models the
@@ -36,9 +39,12 @@ type Fake struct {
 	objects map[string][]byte
 	notes   map[string]map[string][]Note
 	tickets map[string]*fakeTicket
-	pools   map[string][]Proposal
-	hooks   map[string][]func([]byte) HookResult
-	trust   []TrustEntry
+	// artifacts indexes artifact-ref object ids by ticket, as varvig's per-ticket
+	// index note does.
+	artifacts map[string][]string
+	pools     map[string][]Proposal
+	hooks     map[string][]func([]byte) HookResult
+	trust     []TrustEntry
 
 	// Upstream is the peer Fetch and Push exchange with. Nil means this cell has
 	// no upstream configured, which is a legitimate single-cell deployment.
@@ -46,6 +52,10 @@ type Fake struct {
 	// Partitioned makes Fetch and Push return ErrUnreachable. This is how the
 	// §9.2 and §9.3 tests take upstream away without taking the cell down.
 	Partitioned bool
+	// UnsupportedVerbs makes the named commands return ErrUnsupported, so a cell
+	// running against an older core can be exercised. Keys are the command as it
+	// appears on the command line, e.g. "tickets attach-artifact".
+	UnsupportedVerbs map[string]bool
 
 	// CommitFunc, if set, replaces the default commit. The default hashes the
 	// directory name and the message, which is enough to give each attempt a
@@ -69,13 +79,14 @@ type fakeTicket struct {
 // NewFake returns an initialized Fake.
 func NewFake(label string) *Fake {
 	return &Fake{
-		Label:   label,
-		refs:    map[string]string{},
-		objects: map[string][]byte{},
-		notes:   map[string]map[string][]Note{},
-		tickets: map[string]*fakeTicket{},
-		pools:   map[string][]Proposal{},
-		hooks:   map[string][]func([]byte) HookResult{},
+		Label:     label,
+		refs:      map[string]string{},
+		objects:   map[string][]byte{},
+		notes:     map[string]map[string][]Note{},
+		tickets:   map[string]*fakeTicket{},
+		artifacts: map[string][]string{},
+		pools:     map[string][]Proposal{},
+		hooks:     map[string][]func([]byte) HookResult{},
 	}
 }
 
@@ -296,6 +307,61 @@ func (f *Fake) ReadBlob(idOrRef string) ([]byte, error) {
 	return append([]byte(nil), b...), nil
 }
 
+// AttachArtifact implements Varvig, modelling the object form: the ref is stored
+// under an id, indexed against the ticket, and — the property that matters —
+// kept somewhere GC could see it. Set UnsupportedVerbs to simulate an older core.
+func (f *Fake) AttachArtifact(ticket string, ref cell.ArtifactRef) (string, error) {
+	if err := ref.Validate(); err != nil {
+		return "", err
+	}
+	// The real verb parses a multihash, so the Fake insists on one too. Otherwise
+	// a test could pass while the Exec client rejected the same value.
+	if _, err := cell.ToMultihash(ref.ContentHash); err != nil {
+		return "", err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.note("AttachArtifact " + ticket)
+	if f.UnsupportedVerbs["tickets attach-artifact"] {
+		return "", fmt.Errorf("%w: tickets: unknown argument \"attach-artifact\"", ErrUnsupported)
+	}
+	ref.Normalize()
+	payload, err := cell.Canonical(ref)
+	if err != nil {
+		return "", err
+	}
+	id := fakeHash("artifact-ref:" + string(payload))
+	f.objects[id] = payload
+	for _, existing := range f.artifacts[ticket] {
+		if existing == id {
+			// Content-addressed: attaching the same artifact twice is one record.
+			return id, nil
+		}
+	}
+	f.artifacts[ticket] = append(f.artifacts[ticket], id)
+	return id, nil
+}
+
+// TicketArtifacts implements Varvig.
+func (f *Fake) TicketArtifacts(ticket string) ([]cell.ArtifactRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.UnsupportedVerbs["tickets artifacts"] {
+		return nil, fmt.Errorf("%w: tickets: unknown subcommand \"artifacts\"", ErrUnsupported)
+	}
+	ids := append([]string(nil), f.artifacts[ticket]...)
+	sort.Strings(ids)
+	var out []cell.ArtifactRef
+	for _, id := range ids {
+		var ref cell.ArtifactRef
+		if err := json.Unmarshal(f.objects[id], &ref); err != nil {
+			return nil, err
+		}
+		out = append(out, ref)
+	}
+	return out, nil
+}
+
 // AddNote implements Varvig.
 func (f *Fake) AddNote(target, namespace string, payload []byte) error {
 	f.mu.Lock()
@@ -473,6 +539,7 @@ func (f *Fake) Fetch(addr, branch string) error {
 	notes := copyNotes(up.notes)
 	tickets := copyTickets(up.tickets)
 	pools := copyPools(up.pools)
+	artifacts := copyIndex(up.artifacts)
 	up.mu.Unlock()
 
 	f.mu.Lock()
@@ -507,6 +574,15 @@ func (f *Fake) Fetch(addr, branch string) error {
 			}
 		}
 	}
+	// Artifact attachments are index notes upstream, and notes replicate by
+	// default (FEDERATION.md §3), so they arrive with everything else.
+	for ticket, ids := range artifacts {
+		for _, id := range ids {
+			if !containsString(f.artifacts[ticket], id) {
+				f.artifacts[ticket] = append(f.artifacts[ticket], id)
+			}
+		}
+	}
 	return nil
 }
 
@@ -522,6 +598,7 @@ func (f *Fake) Push(addr, branch string) error {
 	refs := copyMap(f.refs)
 	objects := copyBytes(f.objects)
 	notes := copyNotes(f.notes)
+	artifacts := copyIndex(f.artifacts)
 	f.mu.Unlock()
 
 	up.mu.Lock()
@@ -549,6 +626,13 @@ func (f *Fake) Push(addr, branch string) error {
 		}
 		for ns, list := range byNS {
 			up.notes[target][ns] = mergeNotes(up.notes[target][ns], list)
+		}
+	}
+	for ticket, ids := range artifacts {
+		for _, id := range ids {
+			if !containsString(up.artifacts[ticket], id) {
+				up.artifacts[ticket] = append(up.artifacts[ticket], id)
+			}
 		}
 	}
 	if len(refused) > 0 {
@@ -682,6 +766,23 @@ func mergeNotes(into, from []Note) []Note {
 		}
 	}
 	return into
+}
+
+func copyIndex(in map[string][]string) map[string][]string {
+	out := make(map[string][]string, len(in))
+	for k, v := range in {
+		out[k] = append([]string(nil), v...)
+	}
+	return out
+}
+
+func containsString(haystack []string, needle string) bool {
+	for _, s := range haystack {
+		if s == needle {
+			return true
+		}
+	}
+	return false
 }
 
 func hasCandidate(pool []Proposal, change string) bool {

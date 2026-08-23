@@ -542,7 +542,7 @@ func (c *Cell) attempt(ctx context.Context, t claim.Ticket, n int, offline bool)
 
 	// Step 6: artifact-refs for binary outputs. Cell-local: Put never transfers
 	// bytes, so a speculative build's output stays here until promotion (§8).
-	artifacts, err := c.recordArtifacts(ctx, task.Dir, change)
+	artifacts, err := c.recordArtifacts(ctx, task.Dir, t.ID, change)
 	if err != nil {
 		c.logf("could not record artifacts for %s: %v", shortID(t.ID), err)
 	}
@@ -748,8 +748,22 @@ func (c *Cell) recordEvidence(target string, ev cell.Evidence) error {
 	return c.V.AddNote(target, cell.NoteEvidence, payload)
 }
 
-// recordArtifacts is step 6.
-func (c *Cell) recordArtifacts(ctx context.Context, dir, change string) ([]cell.ArtifactRef, error) {
+// recordArtifacts is step 6: write artifact-refs for any binary outputs.
+//
+// The ref goes to varvig as a real artifact-ref *object*, via
+// `varvig tickets attach-artifact`. That matters for one specific reason: varvig
+// stores a TypeArtifactRef and pins it for reachability, so when the artifact
+// later goes unreachable it turns up in `varvig gc --report-external` — which is
+// the entire mechanism FEDERATION.md §1 exists to provide, and the one this cell
+// relies on to know what its registry no longer needs. A JSON note carrying the
+// same fields gets none of that: it is not an artifact-ref, so GC's mark phase
+// never sees it and the report is silently always empty.
+//
+// Recording a ref is not replicating bytes. Put is cell-local by contract, so a
+// speculative build's output stays here until promotion (§8) — what leaves the
+// cell is identity and locators, which is what makes the artifact findable at
+// all.
+func (c *Cell) recordArtifacts(ctx context.Context, dir, taskID, change string) ([]cell.ArtifactRef, error) {
 	if c.Artifacts == nil || len(c.ArtifactGlobs) == 0 {
 		return nil, nil
 	}
@@ -769,24 +783,62 @@ func (c *Cell) recordArtifacts(ctx context.Context, dir, change string) ([]cell.
 			if err != nil {
 				return out, err
 			}
+			// ProducedBy is what keeps the attempt answerable. The attachment is
+			// ticket-anchored, because that is the anchor varvig's verb takes, so
+			// with several attempts at one ticket this field is the only thing
+			// that says which attempt built which output.
 			ref.ProducedBy = change
 			ref.Normalize()
 			if err := ref.Validate(); err != nil {
 				return out, err
 			}
-			if change != "" {
-				payload, err := cell.Canonical(ref)
-				if err != nil {
-					return out, err
-				}
-				if err := c.V.AddNote(change, cell.NoteArtifact, payload); err != nil {
-					return out, err
-				}
+			if err := c.attachArtifact(taskID, change, ref); err != nil {
+				return out, err
 			}
 			out = append(out, ref)
 		}
 	}
 	return out, nil
+}
+
+// attachArtifact records one ref, preferring the object form and degrading
+// audibly.
+//
+// The fallback exists because a cell may run against a core older than the
+// attach-artifact verb, and refusing to work at all would be worse. What it must
+// not do is degrade quietly: the note form loses GC reachability, and the symptom
+// is a report that stays empty rather than an error anybody sees. So the
+// degradation is logged every time, naming what is lost.
+func (c *Cell) attachArtifact(taskID, change string, ref cell.ArtifactRef) error {
+	if taskID != "" {
+		id, err := c.V.AttachArtifact(taskID, ref)
+		switch {
+		case err == nil:
+			c.logf("attached artifact %s as %s (produced by %s)",
+				shortHash(ref.ContentHash), shortHash(id), shortHash(change))
+			return nil
+		case errors.Is(err, varvigcli.ErrUnsupported):
+			c.logf("this varvig build has no `tickets attach-artifact`; falling back to a %s note. "+
+				"The artifact will NOT appear in `varvig gc --report-external`, so this cell cannot learn "+
+				"when its registry bytes stop being needed — upgrade varvig to close that gap.",
+				cell.NoteArtifact)
+		default:
+			return fmt.Errorf("attaching artifact %s: %w", shortHash(ref.ContentHash), err)
+		}
+	}
+	// Fallback, and the no-change case: a note on whatever anchor exists.
+	target := change
+	if target == "" {
+		target = taskID
+	}
+	if target == "" {
+		return nil
+	}
+	payload, err := cell.Canonical(ref)
+	if err != nil {
+		return err
+	}
+	return c.V.AddNote(target, cell.NoteArtifact, payload)
 }
 
 // readContext reads the ticket's read set out of the checkout, as supporting

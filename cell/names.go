@@ -29,6 +29,14 @@ const (
 	// NoteEnvironment carries the environment descriptors evidence points at.
 	NoteEnvironment = "factory/environment"
 	// NoteArtifact carries artifact-ref records for binary outputs (CELL.md §7).
+	//
+	// Legacy. varvig now has `tickets attach-artifact`, which stores a real
+	// artifact-ref object and pins it for reachability, so that is what a cell
+	// writes. This namespace remains only as the fallback for a core without the
+	// verb, and a record here is invisible to `varvig gc --report-external` — the
+	// reason the object form is preferred. Kept in the contract because removing
+	// a published namespace is churn, and because a cell may still read records an
+	// older Factory wrote.
 	NoteArtifact = "factory/artifact"
 	// NoteAgreement carries promotion-agreement observations (CELL.md §9).
 	NoteAgreement = "factory/agreement"
