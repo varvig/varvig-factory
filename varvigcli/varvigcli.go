@@ -37,6 +37,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/varvig/varvig-factory/cell"
 )
 
 // ErrNoRef is returned when a ref does not exist. It is a named error because
@@ -54,6 +56,15 @@ var ErrCAS = errors.New("varvigcli: compare-and-swap refused")
 // (FACTORY.md §5.2) — collapsing it into a generic failure is how local-first
 // operation quietly stops being real.
 var ErrUnreachable = errors.New("varvigcli: upstream unreachable")
+
+// ErrUnsupported is returned when this varvig build does not have the verb
+// Factory asked for.
+//
+// It exists so that "your core is older than this cell" is a distinguishable
+// answer rather than a generic failure. A caller can then degrade deliberately
+// and say so — which matters because the degradation is usually invisible in the
+// output and visible only much later, in what some other tool fails to report.
+var ErrUnsupported = errors.New("varvigcli: this varvig build does not support that command")
 
 // Ref is one entry of `varvig read refs`.
 type Ref struct {
@@ -186,6 +197,21 @@ type Varvig interface {
 	// ReadBlob reads a blob by object id or by a ref naming one.
 	ReadBlob(idOrRef string) ([]byte, error)
 
+	// AttachArtifact records an external artifact against a ticket, returning the
+	// artifact-ref object's id.
+	//
+	// This is the *object* form: varvig stores a real TypeArtifactRef and pins it
+	// for reachability, so the artifact appears in `varvig gc --report-external`
+	// when it goes unreachable (FEDERATION.md §1). A JSON note carrying the same
+	// fields does not — which is the whole reason to prefer this.
+	//
+	// ContentHash must be in Factory's labelled form; the adapter converts it to
+	// the multihash varvig expects. Returns ErrUnsupported on a core without the
+	// verb.
+	AttachArtifact(ticket string, ref cell.ArtifactRef) (string, error)
+	// TicketArtifacts lists the artifact-refs attached to a ticket.
+	TicketArtifacts(ticket string) ([]cell.ArtifactRef, error)
+
 	// AddNote attaches a note to an object in a namespace.
 	AddNote(target, namespace string, payload []byte) error
 	// Notes lists the notes attached to an object in a namespace.
@@ -280,6 +306,9 @@ func classify(err error, msg string) error {
 		strings.Contains(l, "i/o timeout"), strings.Contains(l, "dial tcp"),
 		strings.Contains(l, "no such host"), strings.Contains(l, "network is unreachable"):
 		return fmt.Errorf("%w: %v", ErrUnreachable, err)
+	case strings.Contains(l, "unknown argument"), strings.Contains(l, "unknown subcommand"),
+		strings.Contains(l, "unknown command"), strings.Contains(l, "unknown tickets subcommand"):
+		return fmt.Errorf("%w: %v", ErrUnsupported, err)
 	}
 	return err
 }
@@ -399,23 +428,40 @@ func (e Exec) ResolveRef(name string) (string, error) {
 	return fields[0], nil
 }
 
-// UpdateRef implements Varvig. `varvig update-ref <name> <new> [old]` is silent
-// on success; omitting old means "must not already exist".
+// UpdateRef implements Varvig. `varvig update-ref <name> <new> <old>` is silent
+// on success.
+//
+// The old value is ALWAYS passed, and an empty oldValue is sent as the explicit
+// zero — varvig's spelling of "expected absent". Omitting the argument instead
+// means something quite different: varvig resolves the ref's current value and
+// uses *that* as the expectation, which is an unconditional set. Sending nothing
+// would therefore turn every create-only write into an overwrite, and the write
+// that matters most is the attempt ref, which the contract requires to be created
+// once and never moved (CELL.md §2). That immutability is what makes two
+// partitioned cells' attempts both survive a reconnect; an unconditional set
+// would silently discard one of them.
 func (e Exec) UpdateRef(name, newValue, oldValue string) error {
-	args := []string{"update-ref", name, newValue}
-	if oldValue != "" {
-		args = append(args, oldValue)
+	if oldValue == "" {
+		oldValue = zeroValue
 	}
-	_, err := e.run(args...)
+	_, err := e.run("update-ref", name, newValue, oldValue)
 	return err
 }
+
+// zeroValue is how varvig spells "no value" in a ref argument: absent, for an
+// expected-old, and deletion, for a new value.
+const zeroValue = "0"
 
 // DeleteRef implements Varvig. varvig spells a deletion as an update to the
 // zero value — `varvig update-ref <name> 0 <old>` — so the removal goes through
 // the same compare-and-swap as any other ref move and lands in the same reflog.
 func (e Exec) DeleteRef(name, oldValue string) error {
-	args := []string{"update-ref", name, "0"}
+	args := []string{"update-ref", name, zeroValue}
 	if oldValue != "" {
+		// Unlike UpdateRef, an empty oldValue here is deliberately left off: a
+		// caller deleting a ref it did not just read wants the deletion to
+		// succeed, not to guess an expected value. Passing the zero would assert
+		// the ref is already absent and fail on every real deletion.
 		args = append(args, oldValue)
 	}
 	_, err := e.run(args...)
@@ -439,6 +485,99 @@ func (e Exec) ReadBlob(idOrRef string) ([]byte, error) {
 		return nil, err
 	}
 	return []byte(out), nil
+}
+
+// AttachArtifact implements Varvig via `varvig tickets attach-artifact`.
+//
+// Format: "attached artifact <object id> to <short ticket>". The content hash and
+// producing change go over as multihashes, which is what the verb parses; the
+// conversion is lossless because Factory's digest is already SHA-256 and
+// SHA2-256 is a registered multihash code (cell.ToMultihash).
+func (e Exec) AttachArtifact(ticket string, ref cell.ArtifactRef) (string, error) {
+	if err := ref.Validate(); err != nil {
+		return "", err
+	}
+	contentHash, err := cell.ToMultihash(ref.ContentHash)
+	if err != nil {
+		return "", err
+	}
+	args := []string{"tickets", "attach-artifact", ticket, "--content-hash", contentHash}
+	if ref.MediaType != "" {
+		args = append(args, "--media-type", ref.MediaType)
+	}
+	if ref.Size > 0 {
+		args = append(args, "--size", strconv.FormatInt(ref.Size, 10))
+	}
+	// Locators are already sorted and deduplicated by Normalize, and the verb
+	// preserves them, so an equal locator set produces an equal record.
+	for _, loc := range ref.Locators {
+		args = append(args, "--locator", loc)
+	}
+	if ref.ProducedBy != "" {
+		// The producing change is a varvig object id, already multihash hex —
+		// passed through rather than converted, since converting a hash that is
+		// not Factory-labelled would be a category error.
+		args = append(args, "--produced-by", ref.ProducedBy)
+	}
+	out, err := e.run(args...)
+	if err != nil {
+		return "", err
+	}
+	fields := strings.Fields(firstLine(out))
+	if len(fields) < 3 {
+		return "", fmt.Errorf("varvigcli: could not read an artifact id from %q", firstLine(out))
+	}
+	return fields[2], nil
+}
+
+// TicketArtifacts implements Varvig via `varvig tickets artifacts`, which prints
+// JSON lines — one compact object per artifact-ref, with exactly the field names
+// cell.ArtifactRef uses.
+func (e Exec) TicketArtifacts(ticket string) ([]cell.ArtifactRef, error) {
+	out, err := e.run("tickets", "artifacts", ticket)
+	if err != nil {
+		return nil, err
+	}
+	return parseArtifactLines(out)
+}
+
+// parseArtifactLines decodes the JSON-lines output, converting each content hash
+// back into Factory's labelled form.
+func parseArtifactLines(out string) ([]cell.ArtifactRef, error) {
+	var refs []cell.ArtifactRef
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var wire struct {
+			ContentHash string   `json:"content_hash"`
+			MediaType   string   `json:"media_type"`
+			Size        int64    `json:"size"`
+			Locators    []string `json:"locators"`
+			ProducedBy  string   `json:"produced_by"`
+		}
+		if err := json.Unmarshal([]byte(line), &wire); err != nil {
+			return nil, fmt.Errorf("varvigcli: parsing `tickets artifacts` line %q: %w", line, err)
+		}
+		labelled, err := cell.FromMultihash(wire.ContentHash)
+		if err != nil {
+			// A content hash in an algorithm this build cannot name is not
+			// something to pass along unlabelled: it would look like a Factory
+			// hash and compare as equal to nothing.
+			return nil, fmt.Errorf("varvigcli: artifact content hash: %w", err)
+		}
+		ref := cell.ArtifactRef{
+			ContentHash: labelled,
+			MediaType:   wire.MediaType,
+			Size:        wire.Size,
+			Locators:    wire.Locators,
+			ProducedBy:  wire.ProducedBy,
+		}
+		ref.Normalize()
+		refs = append(refs, ref)
+	}
+	return refs, nil
 }
 
 // AddNote implements Varvig. The payload goes through a temporary file rather

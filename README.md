@@ -293,17 +293,41 @@ while the ground under it moves.
 
 ## Artifacts
 
-Binary outputs are referenced by `artifact-ref` records, never stored in varvig.
+Binary outputs are referenced by `artifact-ref` objects, never stored in varvig.
+A cell records one with varvig's own verb, `tickets attach-artifact`, which stores
+a real `TypeArtifactRef` and pins it for reachability.
 
-**Speculative artifacts stay cell-local.** Replicate on promotion, not on
-attempt — a federation that replicated every attempt's build output has turned
-speculation into a bandwidth bill. The seam encodes that structurally rather than
-by convention: `Put` is always local and `Replicate` is the only method that can
-send bytes anywhere, so the attempt path has no method that could leak.
+That last part is the reason to use the verb rather than a note with the same
+fields: only a real artifact-ref reaches `varvig gc --report-external`, so only
+that form lets a cell ever learn its registry bytes are no longer needed. A note
+is invisible to GC's mark phase, and the symptom is a report that stays
+permanently empty. `varvigcli`'s integration test proves the difference by making
+an artifact unreachable and checking which form comes back.
 
-Factory owns registry credentials; **varvig must never acquire them**.
-`varvig gc --report-external` reports unreachable artifact hashes; deletion is
-Factory's or the operator's action.
+Factory hashes artifact bytes with SHA-256 and converts to varvig's multihash on
+the way out — `sha256:<hex>` → `1220<hex>`. Lossless, no rehash, no dependency,
+because SHA2-256 is a registered multihash code. Reading back, a cell also accepts
+BLAKE3, since a peer may have hashed with varvig's default; a hash in an algorithm
+it cannot name is an error rather than a value passed along unlabelled.
+
+The attachment is ticket-anchored, because that is the anchor the verb takes, so
+`produced_by` carries the attempt and is what distinguishes two attempts' outputs
+under one ticket.
+
+**Speculative artifacts stay cell-local.** Replicate on promotion, not on attempt
+— a federation that replicated every attempt's build output has turned speculation
+into a bandwidth bill. The seam encodes that structurally rather than by
+convention: `Put` is always local and `Replicate` is the only method that can send
+bytes, so the attempt path has no method that could leak. Recording a reference is
+not replicating bytes.
+
+Factory owns registry credentials; **varvig must never acquire them**. varvig
+reports unreachable artifact hashes; deletion is Factory's or the operator's
+action.
+
+A cell running against a core without the verb falls back to a `factory/artifact`
+note and **says so every time**, naming what is lost. Degrading is acceptable;
+degrading quietly is not.
 
 ## Layout
 
@@ -370,16 +394,19 @@ so a newline-free payload is recoverable exactly. A pretty-printed one would not
 be — and the Fake refuses a multiline payload so a test cannot pass against
 behaviour the real client would break on.
 
-Two places where varvig does not yet have a native verb, and what Factory does
-meanwhile:
+Two notes on places where the two layers meet:
 
-- **`artifact-ref` and environment objects** have no CLI. Factory writes the same
-  field shapes as notes in the `factory/artifact` and `factory/environment`
-  namespaces. The shapes mirror varvig's `TypeArtifactRef` and `TypeEnvironment`
-  exactly, so a native verb can replace the note form without changing this
-  contract or any consumer of it.
-- **Pins** use varvig's own ref naming — `refs/pins/<hex peer id>/<16 hex
-  not_after>/<object hash>` — rather than a shape of Factory's own. A pin written
+- **Artifact-refs now go through `varvig tickets attach-artifact`**, which stores a
+  real object. This replaced an earlier note-based form — the promise that the
+  shapes mirrored `TypeArtifactRef` "so a native verb can replace the note form
+  without changing this contract" held: the field names were already identical, so
+  the switch touched the write path and nothing else.
+- **Environment descriptors** still have no CLI, so they remain notes in
+  `factory/environment`, mirroring `TypeEnvironment` field for field on the same
+  bet. Unlike artifacts nothing is lost by the note form here: an environment is
+  compared, not garbage-collected.
+- **Pins** use varvig's own ref naming — `refs/pins/{hex peer id}/{16 hex
+  not_after}/{object hash}` — rather than a shape of Factory's own. A pin written
   in a shape varvig cannot parse would occupy the namespace while failing to be
   recognised as a pin.
 
@@ -449,6 +476,27 @@ go test ./...
 go test -race ./...
 go test -coverpkg=./... ./...
 ```
+
+### Integration tests against a real core
+
+`varvigcli` also has tests that drive the actual `varvig` binary. They **skip**
+when one is not on `PATH`, so CI stays green without it, and they run for anyone
+who has one:
+
+```sh
+go build -o /usr/local/bin/varvig ./cmd/varvig   # in a varvig/varvig checkout
+go test -run Integration ./varvigcli/
+```
+
+These earn their keep. Every other test in that package pins a CLI format by
+asserting against a fixture string, which proves the parser matches the fixture
+and nothing about whether the fixture matches varvig. The first run of the
+integration suite found a real bug the whole unit suite had passed over:
+`UpdateRef` omitted its expected-old argument, which varvig reads as *set
+unconditionally* rather than *must not exist* — so a real cell would have silently
+overwritten attempt refs, the one thing the contract forbids. The Fake enforced
+create-only correctly, and that is exactly how a fake stricter than reality hides
+a bug.
 
 ## Build order
 

@@ -82,6 +82,26 @@ jobs:
       - name: demo
         run: go run ./cmd/factory-demo
 
+      # Build the real varvig and run the integration tests against it.
+      #
+      # These are the only tests that can catch CLI format drift: every other test
+      # pins a format against a fixture this repo wrote, which proves the parser
+      # matches the fixture and nothing about whether the fixture matches varvig.
+      # They skip silently when no binary is present, so without this step they
+      # would never run anywhere and the drift they exist to catch would land.
+      #
+      # continue-on-error, deliberately: varvig's main is not this repo's
+      # dependency to pin, so a breaking change there must not block a Factory PR
+      # that is fine on its own terms. The step still goes red and says what broke.
+      - name: integration (real varvig CLI)
+        continue-on-error: true
+        run: |
+          git clone --depth 1 https://github.com/varvig/varvig /tmp/varvig
+          cd /tmp/varvig/varvig && go build -o /usr/local/bin/varvig ./cmd/varvig
+          cd "$GITHUB_WORKSPACE"
+          varvig --version
+          go test -v -run Integration ./varvigcli/
+
       # The README promises this module has no third-party dependencies, and a
       # vendor SDK behind an adapter would be the vendor leaking through the seam
       # the adapter exists to hide. A promise nothing checks is a promise that

@@ -3,8 +3,12 @@ package varvigcli
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/varvig/varvig-factory/cell"
 )
 
 // The parser tests below pin the exact porcelain formats this adapter depends
@@ -327,3 +331,164 @@ func TestFakeHookRunReturnsEachModulesVerdict(t *testing.T) {
 }
 
 var _ Varvig = Exec{}
+
+// shim writes an executable stand-in for `varvig` that records the arguments it
+// was called with, so the argv this adapter constructs is observable without a
+// real binary — and therefore checkable in CI.
+func shim(t *testing.T) (Exec, func() []string) {
+	t.Helper()
+	dir := t.TempDir()
+	log := filepath.Join(dir, "argv")
+	bin := filepath.Join(dir, "varvig")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" >> " + log + "\nexit 0\n"
+	if err := os.WriteFile(bin, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return Exec{Bin: bin, Dir: dir}, func() []string {
+		raw, err := os.ReadFile(log)
+		if err != nil {
+			return nil
+		}
+		var out []string
+		for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+			if line != "" {
+				out = append(out, line)
+			}
+		}
+		return out
+	}
+}
+
+// TestUpdateRefAlwaysSendsAnExpectedOldValue pins the create-only semantics.
+//
+// This test exists because the Fake enforced create-only correctly while the Exec
+// client did not: it omitted the third argument, which varvig reads as "expect
+// whatever is there" — an unconditional set. The whole suite passed while a real
+// cell would have silently overwritten attempt refs, the one thing CELL.md §2
+// forbids. A fake stricter than reality hides exactly this, so the argv is now
+// observed rather than assumed.
+func TestUpdateRefAlwaysSendsAnExpectedOldValue(t *testing.T) {
+	e, argv := shim(t)
+
+	if err := e.UpdateRef("refs/attempts/mini-a/t1/1", "abc", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.UpdateRef("refs/heads/main", "def", "abc"); err != nil {
+		t.Fatal(err)
+	}
+
+	calls := argv()
+	if len(calls) != 2 {
+		t.Fatalf("recorded %d calls, want 2: %v", len(calls), calls)
+	}
+	// An empty expected-old must become the explicit zero, never an omitted
+	// argument: omitting it is what turns a create into an overwrite.
+	if want := "update-ref refs/attempts/mini-a/t1/1 abc " + zeroValue; calls[0] != want {
+		t.Fatalf("create-only argv = %q, want %q", calls[0], want)
+	}
+	if want := "update-ref refs/heads/main def abc"; calls[1] != want {
+		t.Fatalf("cas argv = %q, want %q", calls[1], want)
+	}
+}
+
+func TestDeleteRefOmitsAnUnknownOldValue(t *testing.T) {
+	// The mirror image: here an empty oldValue must be left off. Sending the zero
+	// would assert the ref is already absent, which fails on every real deletion.
+	e, argv := shim(t)
+	if err := e.DeleteRef("refs/pins/x", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.DeleteRef("refs/pins/y", "abc"); err != nil {
+		t.Fatal(err)
+	}
+	calls := argv()
+	if len(calls) != 2 {
+		t.Fatalf("recorded %d calls, want 2: %v", len(calls), calls)
+	}
+	if want := "update-ref refs/pins/x " + zeroValue; calls[0] != want {
+		t.Fatalf("argv = %q, want %q", calls[0], want)
+	}
+	if want := "update-ref refs/pins/y " + zeroValue + " abc"; calls[1] != want {
+		t.Fatalf("argv = %q, want %q", calls[1], want)
+	}
+}
+
+func TestAttachArtifactConvertsTheContentHash(t *testing.T) {
+	// varvig's verb parses a multihash. Sending Factory's labelled form would be
+	// rejected outright, so the conversion is part of the adapter's contract.
+	e, argv := shim(t)
+	ref := cell.ArtifactRef{
+		ContentHash: "sha256:" + strings.Repeat("ab", 32),
+		MediaType:   "application/octet-stream",
+		Size:        41,
+		Locators:    []string{"oci://b/x", "oci://a/x"},
+		ProducedBy:  "1e20" + strings.Repeat("cd", 32),
+	}
+	ref.Normalize()
+	if _, err := e.AttachArtifact("ticket01", ref); err != nil {
+		// The shim prints nothing, so reading back an id fails — the argv is what
+		// is under test here.
+		if !strings.Contains(err.Error(), "artifact id") {
+			t.Fatal(err)
+		}
+	}
+	calls := argv()
+	if len(calls) != 1 {
+		t.Fatalf("recorded %d calls: %v", len(calls), calls)
+	}
+	got := calls[0]
+	if !strings.Contains(got, "--content-hash 1220"+strings.Repeat("ab", 32)) {
+		t.Fatalf("content hash was not converted to a multihash: %q", got)
+	}
+	if strings.Contains(got, "sha256:") {
+		t.Fatalf("a Factory-labelled hash was sent to varvig: %q", got)
+	}
+	if !strings.Contains(got, "--size 41") || !strings.Contains(got, "--media-type application/octet-stream") {
+		t.Fatalf("metadata missing: %q", got)
+	}
+	// Locators go over sorted, so an equal locator set produces an equal record.
+	if !strings.Contains(got, "--locator oci://a/x --locator oci://b/x") {
+		t.Fatalf("locators are not in canonical order: %q", got)
+	}
+	// The producing change is already multihash hex and must be passed through.
+	if !strings.Contains(got, "--produced-by 1e20"+strings.Repeat("cd", 32)) {
+		t.Fatalf("produced-by was altered: %q", got)
+	}
+}
+
+func TestParseArtifactLinesReadsJSONLines(t *testing.T) {
+	out := `{"content_hash":"1220` + strings.Repeat("ab", 32) + `","media_type":"application/octet-stream","size":41,"locators":["oci://a/x"]}
+{"content_hash":"1e20` + strings.Repeat("cd", 32) + `"}
+`
+	refs, err := parseArtifactLines(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("parsed %d refs, want 2", len(refs))
+	}
+	if refs[0].ContentHash != "sha256:"+strings.Repeat("ab", 32) {
+		t.Fatalf("content hash = %q", refs[0].ContentHash)
+	}
+	if refs[0].Size != 41 || refs[0].MediaType != "application/octet-stream" {
+		t.Fatalf("ref = %+v", refs[0])
+	}
+	// A peer's blake3-hashed artifact is readable and honestly labelled.
+	if refs[1].ContentHash != "blake3:"+strings.Repeat("cd", 32) {
+		t.Fatalf("peer content hash = %q", refs[1].ContentHash)
+	}
+	// A hash in an algorithm this build cannot name is an error, not a value
+	// passed along unlabelled.
+	if _, err := parseArtifactLines(`{"content_hash":"9920` + strings.Repeat("ab", 32) + `"}`); err == nil {
+		t.Fatal("an unknown hash algorithm was accepted")
+	}
+}
+
+func TestClassifyDetectsAnOlderCore(t *testing.T) {
+	// "your core is older than this cell" must be distinguishable, so a caller can
+	// degrade deliberately and say so rather than fail opaquely.
+	err := classify(errors.New(`x: tickets: unknown argument "attach-artifact"`), `tickets: unknown argument "attach-artifact"`)
+	if !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("err = %v, want ErrUnsupported", err)
+	}
+}

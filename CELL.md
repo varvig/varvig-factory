@@ -59,7 +59,7 @@ identity is the one thing that cannot be done afterwards.
 | `refs/pins/<cell-id>/…` | Retention requests — varvig's own pin namespace (`FEDERATION.md` §4) |
 | note namespace `factory/evidence` | Evidence for an attempt (§4) |
 | note namespace `factory/environment` | The environment descriptor an evidence record was produced in (§4.2) |
-| note namespace `factory/artifact` | `artifact-ref` records for an attempt's binary outputs (§7) |
+| note namespace `factory/artifact` | *Legacy.* `artifact-ref` records, for a core without `tickets attach-artifact` (§7) |
 | note namespace `factory/agreement` | Promotion-agreement observations, per scope (§8) |
 
 `<task-id>` is the varvig ticket id — the genesis intent revision hash, stable
@@ -271,7 +271,24 @@ measurement.
 
 ## 7. Artifacts
 
-Binary outputs are referenced, never stored in varvig (§8):
+Binary outputs are referenced, never stored in varvig (§8). A reference is
+recorded with varvig's own verb:
+
+```
+varvig tickets attach-artifact <ticket> --content-hash <multihash> \
+  [--media-type M] [--size N] [--locator U ...] [--produced-by <change>]
+```
+
+This stores a real `artifact-ref` object and pins it for reachability, which is
+the whole point: when the artifact later goes unreachable it appears in
+`varvig gc --report-external`, and a cell can learn that its registry bytes are
+no longer needed. **A JSON note carrying the same fields does not.** It is not an
+`artifact-ref`, so GC's mark phase never sees it and the report is silently always
+empty — the exact failure `varvig-federation-spec.md` §1 exists to prevent
+("either deleted while a live change still needs it, or orphaned forever because
+nothing knew it went unreachable").
+
+The record's fields:
 
 ```json
 {
@@ -284,16 +301,55 @@ Binary outputs are referenced, never stored in varvig (§8):
 ```
 
 `content_hash` is identity; `locators` are hints, sorted and deduplicated so an
-equal locator set encodes identically. A locator changing is not a new artifact.
+equal locator set encodes identically. A locator changing is not a new artifact —
+that distinction is why the same image reachable from three registries is one
+record with three locators rather than three records.
+
+### 7.1 Hash encoding across the boundary
+
+A cell computes `content_hash` in the labelled form of §4.3 and converts it to a
+multihash on the way to varvig. The conversion is lossless and involves no second
+hash: varvig's multihash is `<uvarint code><uvarint length><digest>`, SHA2-256 is
+a registered code (`0x12`), and both forms carry the same 32 digest bytes. So
+`sha256:<hex>` becomes `1220<hex>`.
+
+This is the payoff of §4.3's argument that the algorithm choice was never
+load-bearing. Reading back, a cell accepts BLAKE3 (`0x1e`) as well, because a
+content hash may have been written by a peer that hashed with varvig's default —
+and refusing to read it would make a cell blind to artifacts it did not produce.
+A hash in an algorithm the cell cannot name is an error, never a value passed
+along unlabelled.
+
+### 7.2 Anchoring
+
+The attachment is **ticket-anchored**, because that is the anchor varvig's verb
+takes. With several attempts at one ticket, `produced_by` is therefore the only
+thing that says which attempt built which output, and a cell must always set it.
+
+varvig's own reader already unions the per-ticket index with a change's
+`Change.Artifacts` "for the day a materialization producer names on the change the
+artifacts it built" — which is exactly a cell's case. When a verb exists to write
+that field, a cell should move to it and drop the ticket-anchored form; until then
+ticket + `produced_by` is complete, and writing both would be two records that can
+disagree.
+
+### 7.3 Retention
 
 - **Speculative artifacts stay cell-local.** Replicate on promotion, not on
   attempt. A federation that replicates every attempt's build output has turned
-  speculation into a bandwidth bill.
+  speculation into a bandwidth bill. Recording a reference is not replicating
+  bytes: what leaves the cell is identity and locators.
 - **Factory owns registry credentials; varvig must never acquire them.** varvig
-  reports unreachable artifact hashes (`varvig gc --report-external`); deletion
-  is Factory's or the operator's action.
+  reports unreachable artifact hashes; deletion is Factory's or the operator's
+  action.
 
----
+### 7.4 The legacy note form
+
+A cell running against a core without `tickets attach-artifact` falls back to a
+note in `factory/artifact` carrying the fields above. The fallback must be
+**announced every time**, naming what is lost: the artifact will not appear in
+`varvig gc --report-external`, and the symptom of not saying so is a report that
+stays empty rather than an error anybody sees.
 
 ## 8. Budget
 
