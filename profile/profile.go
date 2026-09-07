@@ -27,6 +27,7 @@ import (
 	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/budget"
 	"github.com/varvig/varvig-factory/cell"
+	"github.com/varvig/varvig-factory/effect"
 	"github.com/varvig/varvig-factory/gate"
 	"github.com/varvig/varvig-factory/inference"
 	"github.com/varvig/varvig-factory/loop"
@@ -218,6 +219,54 @@ type Config struct {
 	YieldToFreshClaims bool `json:"yield_to_fresh_claims,omitempty"`
 	// MaxAttemptsPerCell caps repeat attempts by this cell at one task.
 	MaxAttemptsPerCell int `json:"max_attempts_per_cell,omitempty"`
+
+	// Effects configures effectful capabilities (§6.7). Absent is the normal
+	// case: a cell that builds and tests code has no business holding a
+	// purchasing integration, and requiring every deployment to configure one
+	// would be absurd.
+	Effects EffectConfig `json:"effects,omitempty"`
+}
+
+// EffectConfig wires a cell for effectful capabilities.
+//
+// Nothing here grants authority to spend — that is a lease, which an overseer
+// writes and this cell cannot. This says only which integrations exist and who
+// authorizes their use.
+type EffectConfig struct {
+	// AuthorizedBy is the higher principal that authorizes this cell's effectful
+	// actions. It must not be this cell (§9.15), and the check lives in
+	// effect.Check rather than here, so a cell cannot authorize its own spending
+	// by editing its own configuration.
+	AuthorizedBy string `json:"authorized_by,omitempty"`
+	// TTL is how long a reservation holds lease headroom before the hold lapses
+	// (§9.14). Empty means no expiry, which is only right for a capability that
+	// always answers synchronously — for anything asynchronous a lost response
+	// then consumes the headroom for good.
+	TTL Duration `json:"reservation_ttl,omitempty"`
+	// Capabilities are the effectful capabilities this cell can perform.
+	Capabilities []EffectCapabilityConfig `json:"capabilities,omitempty"`
+}
+
+// EffectCapabilityConfig is one wired effectful capability.
+type EffectCapabilityConfig struct {
+	// ID is the alias and Interface the hash it resolves to. The hash is
+	// required: two factories may use one alias for different interfaces, and
+	// here the ambiguity would be resolved by spending money (§2.1).
+	ID        string `json:"id"`
+	Interface string `json:"interface"`
+	// Executor names the in-process integration. Only "refusing" exists so far —
+	// it declines every action, which is how an operator proves the wiring works
+	// without anything being ordered.
+	//
+	// This field is **not** the extension point, and is not meant to grow a
+	// vendor list. Adding a vendor by rebuilding the cell binary makes no sense,
+	// and it would put that vendor's credentials in the cell process. The
+	// extension point is a connector peer answering reservations from the
+	// repository — the shape core already uses for tracker bridges, where the
+	// connector holds the vendor's credentials, runs anywhere, and needs no
+	// recompile. That protocol is the next piece of work; until it lands, this
+	// selects between the built-ins.
+	Executor string `json:"executor,omitempty"`
 }
 
 // Micro is the CPU-local profile: **roles verify and build, not attempt**
@@ -362,8 +411,38 @@ func (c Config) Capabilities() cell.Capabilities {
 			Context: c.Inference.Context,
 		}}
 	}
+	for _, e := range c.Effects.Capabilities {
+		caps.Effects = append(caps.Effects, cell.EffectCapability{ID: e.ID, Interface: e.Interface})
+	}
 	caps.Normalize()
 	return caps
+}
+
+// buildExecutors turns the configured capabilities into in-process executors.
+//
+// The set is deliberately small and is not where vendors get added: an
+// integration holding credentials to a service that charges money belongs in a
+// separate process, not in the cell binary and not behind a name in a config
+// file. Vendors arrive as connector peers answering reservations from the
+// repository, which is core's own pattern for tracker bridges and needs no
+// rebuild — see EffectCapabilityConfig.Executor.
+func (c Config) buildExecutors() (effect.Executors, error) {
+	var out effect.Executors
+	for _, e := range c.Effects.Capabilities {
+		capability := effect.Capability{ID: e.ID, Interface: e.Interface, Effectful: true}
+		if err := capability.Validate(); err != nil {
+			return nil, err
+		}
+		switch e.Executor {
+		case "", "refusing":
+			// The default is to refuse. A capability declared with no executor
+			// named must not silently become one that acts.
+			out = append(out, effect.Refusing{Capability: capability})
+		default:
+			return nil, fmt.Errorf("profile: capability %q names in-process executor %q, which this build does not contain; vendor integrations arrive as connector peers rather than by name here", e.ID, e.Executor)
+		}
+	}
+	return out, nil
 }
 
 // Validate checks the config for the mistakes that would otherwise surface as
@@ -485,6 +564,10 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 	if err != nil {
 		return Built{}, err
 	}
+	executors, err := c.buildExecutors()
+	if err != nil {
+		return Built{}, err
+	}
 	store, err := c.store()
 	if err != nil {
 		return Built{}, err
@@ -509,6 +592,9 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		YieldToFreshClaims: c.YieldToFreshClaims,
 		MaxAttemptsPerCell: c.MaxAttemptsPerCell,
 		MaxTrustAge:        authority.MaxAge(c.Promotion.MaxTrustAge.D(0)),
+		Executors:          executors,
+		EffectAuthorizedBy: c.Effects.AuthorizedBy,
+		EffectTTL:          int64(c.Effects.TTL.D(0) / time.Second),
 	}
 	cl.Promoter = &promote.Promoter{
 		V:           v,

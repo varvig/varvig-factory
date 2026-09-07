@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/varvig/varvig-factory/agreement"
@@ -442,6 +443,55 @@ func run() error {
 		disconnected.Sync, func() time.Time { return clock }, 0)
 	fmt.Printf("  mini-a authorizing its own order, promote key in hand: allowed=%v escalate=%v\n", self.Allowed, self.Escalate)
 	fmt.Println(indent(self.Error()))
+
+	section("phase 6: a ticket orders a thing — the loop's effectful branch (§6.7, §7.1)")
+
+	// Until this existed, everything above was a library with no path from a
+	// ticket to an order. A ticket names an effectful capability and its
+	// parameters, and is thereby off the speculation path entirely.
+	boardTicket := "c3feed" + strings.Repeat("0", 57) + "7"
+	boardSpec := "Order the prototype run.\n" +
+		"factory-requires: effect=pcb-fabrication@1 interface=" + boards.Interface + "\n" +
+		`factory-effect: {"gerber":"rev-c","quantity":2}`
+	// Seeded into micro-b's own repository: each cell here has its own, syncing
+	// through a shared upstream, which is what makes the partition in phase 3
+	// real rather than simulated.
+	micro.v.AddTicket(boardTicket, boardSpec, varvigcli.Scope{Reads: []string{"hardware"}, Writes: []string{"hardware"}}, "approved")
+	must1(authority.PublishEnvelope(micro.v, envelope, ""))
+
+	// A fresh lease, since the one above is nearly spent, and a fake executor
+	// standing in for the fab. The fake counts how many times the effect really
+	// happened, which is the number every guard in this system is about.
+	must1(authority.PublishLease(micro.v, authority.Lease{
+		CellID: "micro-b", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
+		Envelope: "1e20abc", Amount: 500, Unit: "EUR", Quantity: 10, IssuedAt: clock.Unix(),
+	}, ""))
+	fab := effect.NewFake(boards, 180, "EUR")
+
+	// Note which cell this is: micro-b, the CPU-local verify/build cell with no
+	// model at all. Authority to spend is a lease, not a GPU.
+	micro.cell.Capabilities.Effects = []cell.EffectCapability{{ID: boards.ID, Interface: boards.Interface}}
+	micro.cell.Executors = effect.Executors{fab}
+	micro.cell.EffectAuthorizedBy = "overseer-a"
+	micro.cell.EffectTTL = 3600
+
+	// Driven through the real loop, not a private entry point: the ticket goes
+	// through claim policy and everything else a pass does.
+	pass := must1(micro.cell.Once(ctx))
+	for _, e := range pass.Effects {
+		fmt.Printf("  %s\n", e)
+	}
+	fmt.Printf("  the effect happened %d time(s)\n", fab.Count())
+
+	// A second pass — a restart, a re-observed ticket, a rerun. Nothing orders
+	// again: the cell has already acted, so it does not even re-claim.
+	secondPass := must1(micro.cell.Once(ctx))
+	fmt.Printf("  a second pass produced %d effect(s); the fab was called %d time(s) in total\n",
+		len(secondPass.Effects), fab.Count())
+
+	settledLease, _ := must2(authority.LoadLease(micro.v, "micro-b", "pcb-fabrication@1"))
+	fmt.Printf("  micro-b's lease: %.2f of %.2f EUR spent — and micro-b holds no model at all\n",
+		settledLease.Spent, settledLease.Amount)
 
 	section("done")
 	fmt.Println("Every step above was a write to repository state. No cell ever told another")

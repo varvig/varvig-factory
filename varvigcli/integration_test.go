@@ -1,6 +1,7 @@
 package varvigcli
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -301,5 +302,60 @@ func TestIntegrationRefCASAndDelete(t *testing.T) {
 	}
 	if _, err := e.ResolveRef(pin); err == nil {
 		t.Fatal("the pin still resolves after deletion")
+	}
+}
+
+func TestIntegrationRankMatchesTheParser(t *testing.T) {
+	e := varvigRepo(t)
+
+	// No scoped tickets: core ranks nothing, and that is a normal state rather
+	// than an error.
+	if ranked, err := e.Rank(); err != nil || len(ranked) != 0 {
+		t.Fatalf("an empty repository ranked %v (err %v)", ranked, err)
+	}
+
+	var full []string
+	for i, spec := range []string{"First.", "Second.", "Third."} {
+		id := newTicket(t, e, spec)
+		if _, err := e.run("tickets", "scope", id, "--reads", fmt.Sprintf("src%d", i), "--writes", fmt.Sprintf("src%d", i)); err != nil {
+			t.Fatalf("scoping %s: %v", id, err)
+		}
+		full = append(full, id)
+	}
+
+	ranked, err := e.Rank()
+	if err != nil {
+		t.Fatalf("ranking: %v", err)
+	}
+	if len(ranked) != len(full) {
+		t.Fatalf("ranked %d tickets, want %d — the porcelain format has drifted", len(ranked), len(full))
+	}
+
+	// The point of this test: every short id core printed must match back to a
+	// ticket Factory knows. If core changes how it abbreviates, this is what
+	// catches it — the loop would otherwise silently stop reordering, which
+	// looks exactly like a correctly ordered cell.
+	for _, r := range ranked {
+		matches := 0
+		for _, id := range full {
+			if r.Matches(id) {
+				matches++
+			}
+		}
+		if matches != 1 {
+			t.Fatalf("short id %q matched %d of %d tickets, want exactly 1", r.ShortID, matches, len(full))
+		}
+	}
+
+	// The score parsed as a number rather than being left at zero by a silent
+	// parse failure, and the feature detail came through for the logs.
+	var sawDetail bool
+	for _, r := range ranked {
+		if r.Detail != "" {
+			sawDetail = true
+		}
+	}
+	if !sawDetail {
+		t.Fatal("no ranking carried core's feature detail; the format has drifted")
 	}
 }

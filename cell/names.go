@@ -40,6 +40,13 @@ const (
 	NoteArtifact = "factory/artifact"
 	// NoteAgreement carries promotion-agreement observations (CELL.md §9).
 	NoteAgreement = "factory/agreement"
+	// NoteEffect carries the reservation record for an effectful action taken
+	// against a ticket (CELL.md §8.2).
+	//
+	// The reservation ref is the authoritative record; this note is the same
+	// content attached where the work is, so "what did this ticket cost" is
+	// answerable without knowing to look under a reservation prefix.
+	NoteEffect = "factory/effect"
 
 	// EnvelopePrefix roots overseer envelopes: the per-capability ceilings an
 	// overseer may allocate from (CELL.md §11). Only the owner key may move one
