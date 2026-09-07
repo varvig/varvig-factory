@@ -43,6 +43,7 @@ import (
 	"github.com/varvig/varvig-factory/budget"
 	"github.com/varvig/varvig-factory/cell"
 	"github.com/varvig/varvig-factory/claim"
+	"github.com/varvig/varvig-factory/effect"
 	"github.com/varvig/varvig-factory/inference"
 	"github.com/varvig/varvig-factory/promote"
 	"github.com/varvig/varvig-factory/sandbox"
@@ -97,6 +98,21 @@ type Cell struct {
 	// count as current for promotion (§4.3b).
 	MaxTrustAge authority.MaxAge
 
+	// Executors perform effectful capabilities (§6.7). Empty is the normal case
+	// and means this cell declines every effectful ticket, saying so.
+	Executors effect.Executors
+	// EffectAuthorizedBy is the higher principal that authorized this cell's
+	// effectful actions — an overseer, human or agent.
+	//
+	// It is configuration rather than something the cell derives, and the check
+	// that it is not the cell itself lives in effect.Check, so a cell cannot
+	// authorize its own spending by editing its own config (§9.15).
+	EffectAuthorizedBy string
+	// EffectTTL is how long a reservation holds lease headroom before the hold
+	// lapses (§9.14). Zero means no expiry, which is only right for a capability
+	// that always answers synchronously.
+	EffectTTL int64
+
 	Now func() time.Time
 	Log func(string)
 
@@ -111,8 +127,12 @@ type Cell struct {
 // bare error, because a pass that attempted one ticket and skipped nine has
 // succeeded and the nine skips are the interesting part.
 type Report struct {
-	Offline    bool
-	Observed   int
+	Offline  bool
+	Observed int
+	// Effects are the effectful actions this pass took, refused, or left
+	// unresolved. Refusals are listed rather than counted, because "the cell
+	// declined to order a circuit board" is never a statistic.
+	Effects    []EffectResult
 	Claimed    []string
 	Skipped    map[claim.SkipReason]int
 	Attempts   []AttemptResult
@@ -279,16 +299,27 @@ func (c *Cell) Once(ctx context.Context) (Report, error) {
 		rep.Errors = append(rep.Errors, errs...)
 	}
 
+	// Read once per pass rather than per ticket: it costs a ref read per declared
+	// capability, and nothing about it changes between two tickets in one pass.
+	grants := c.effectGrants()
+
 	for _, t := range tickets {
 		spend := c.Ledger.CanSpend(c.now(), rep.Offline)
+		// An effectful action writes no attempt ref, so its record of "already
+		// acted" is the reservation instead.
+		own := ownAttempts[t.ID]
+		if t.Requirements().Effectful() {
+			own = c.priorEffect(t)
+		}
 		verdict := claim.Evaluate(claim.Inputs{
 			Capabilities:       c.Capabilities,
 			Ticket:             t,
 			BudgetOK:           spend.OK,
 			BudgetReason:       string(spend.Reason),
-			OwnAttempts:        ownAttempts[t.ID],
+			OwnAttempts:        own,
 			MaxAttemptsPerCell: c.maxAttempts(t),
 			ForeignClaims:      claims[t.ID],
+			EffectGrants:       grants,
 			Offline:            rep.Offline,
 			YieldToFreshClaims: c.YieldToFreshClaims,
 			Now:                c.now(),
@@ -309,6 +340,19 @@ func (c *Cell) Once(ctx context.Context) (Report, error) {
 		}
 		rep.Claimed = append(rep.Claimed, t.ID)
 		c.logf("%s", verdict.Reason)
+
+		// An effectful ticket takes the other branch entirely: it is not
+		// attempted, scored or promoted, because none of those mean anything for
+		// an action that happens once in the physical world (§6.7).
+		if t.Requirements().Effectful() {
+			result, err := c.performEffect(ctx, t)
+			rep.Effects = append(rep.Effects, result)
+			c.logf("%s", result)
+			if err != nil {
+				rep.Errors = append(rep.Errors, fmt.Sprintf("effect %s: %v", shortID(t.ID), err))
+			}
+			continue
+		}
 
 		// Steps 4–8.
 		result, err := c.attempt(ctx, t, verdict.Attempt, rep.Offline)
@@ -978,6 +1022,12 @@ func (r Report) Summary() string {
 		r.Observed, len(r.Claimed), len(r.Attempts), len(r.Verified), len(r.Promotions))
 	if r.Offline {
 		b.WriteString(" offline")
+	}
+	// Effects are spelled out rather than counted. An unresolved one especially:
+	// "effects=1" would hide the only line on this page that means an order may
+	// have been placed and nobody knows.
+	for _, e := range r.Effects {
+		fmt.Fprintf(&b, "\n  %s", e)
 	}
 	reasons := make([]string, 0, len(r.Skipped))
 	for reason := range r.Skipped {

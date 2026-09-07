@@ -100,7 +100,10 @@ jobs:
       # Every package holding integration tests has to be named here — a skipping
       # test and a passing one look identical in a summary, so a package left off
       # this line is one nobody notices is unexercised. authority/ and effect/
-      # additionally answer whether core accepts the ref namespaces they claim.
+      # additionally answer whether core accepts the ref namespaces they claim,
+      # and loop/ whether an effectful ticket's directive survives core's own
+      # spec storage — if it did not, two readings of one ticket would derive
+      # two idempotency keys and therefore place two orders.
       #
       # continue-on-error, deliberately: varvig's main is not this repo's
       # dependency to pin, so a breaking change there must not block a Factory PR
@@ -112,7 +115,7 @@ jobs:
           cd /tmp/varvig/varvig && go build -o /usr/local/bin/varvig ./cmd/varvig
           cd "$GITHUB_WORKSPACE"
           varvig --version
-          go test -v -run Integration ./varvigcli/ ./authority/ ./effect/
+          go test -v -run Integration ./varvigcli/ ./authority/ ./effect/ ./loop/
 
       # The README promises this module has no third-party dependencies, and a
       # vendor SDK behind an adapter would be the vendor leaking through the seam

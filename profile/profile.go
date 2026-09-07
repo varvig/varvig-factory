@@ -27,6 +27,7 @@ import (
 	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/budget"
 	"github.com/varvig/varvig-factory/cell"
+	"github.com/varvig/varvig-factory/effect"
 	"github.com/varvig/varvig-factory/gate"
 	"github.com/varvig/varvig-factory/inference"
 	"github.com/varvig/varvig-factory/loop"
@@ -218,6 +219,47 @@ type Config struct {
 	YieldToFreshClaims bool `json:"yield_to_fresh_claims,omitempty"`
 	// MaxAttemptsPerCell caps repeat attempts by this cell at one task.
 	MaxAttemptsPerCell int `json:"max_attempts_per_cell,omitempty"`
+
+	// Effects configures effectful capabilities (§6.7). Absent is the normal
+	// case: a cell that builds and tests code has no business holding a
+	// purchasing integration, and requiring every deployment to configure one
+	// would be absurd.
+	Effects EffectConfig `json:"effects,omitempty"`
+}
+
+// EffectConfig wires a cell for effectful capabilities.
+//
+// Nothing here grants authority to spend — that is a lease, which an overseer
+// writes and this cell cannot. This says only which integrations exist and who
+// authorizes their use.
+type EffectConfig struct {
+	// AuthorizedBy is the higher principal that authorizes this cell's effectful
+	// actions. It must not be this cell (§9.15), and the check lives in
+	// effect.Check rather than here, so a cell cannot authorize its own spending
+	// by editing its own configuration.
+	AuthorizedBy string `json:"authorized_by,omitempty"`
+	// TTL is how long a reservation holds lease headroom before the hold lapses
+	// (§9.14). Empty means no expiry, which is only right for a capability that
+	// always answers synchronously — for anything asynchronous a lost response
+	// then consumes the headroom for good.
+	TTL Duration `json:"reservation_ttl,omitempty"`
+	// Capabilities are the effectful capabilities this cell can perform.
+	Capabilities []EffectCapabilityConfig `json:"capabilities,omitempty"`
+}
+
+// EffectCapabilityConfig is one wired effectful capability.
+type EffectCapabilityConfig struct {
+	// ID is the alias and Interface the hash it resolves to. The hash is
+	// required: two factories may use one alias for different interfaces, and
+	// here the ambiguity would be resolved by spending money (§2.1).
+	ID        string `json:"id"`
+	Interface string `json:"interface"`
+	// Executor names the integration. Only "refusing" is built in — it declines
+	// every action, which is how an operator proves the wiring works without
+	// anything being ordered. Real integrations are compiled in by whoever
+	// operates the factory, because Factory owns credentials to external
+	// services and a plugin loader for that is a worse idea than a rebuild.
+	Executor string `json:"executor,omitempty"`
 }
 
 // Micro is the CPU-local profile: **roles verify and build, not attempt**
@@ -362,8 +404,37 @@ func (c Config) Capabilities() cell.Capabilities {
 			Context: c.Inference.Context,
 		}}
 	}
+	for _, e := range c.Effects.Capabilities {
+		caps.Effects = append(caps.Effects, cell.EffectCapability{ID: e.ID, Interface: e.Interface})
+	}
 	caps.Normalize()
 	return caps
+}
+
+// buildExecutors turns the configured capabilities into executors.
+//
+// Only the refusing executor is built in, and that is deliberate: a real
+// integration holds credentials to a service that charges money, so it is
+// compiled in by whoever operates the factory. A plugin loader here would mean
+// arbitrary code reached by name from a config file, in the one path that
+// spends — which is a worse idea than a rebuild.
+func (c Config) buildExecutors() (effect.Executors, error) {
+	var out effect.Executors
+	for _, e := range c.Effects.Capabilities {
+		capability := effect.Capability{ID: e.ID, Interface: e.Interface, Effectful: true}
+		if err := capability.Validate(); err != nil {
+			return nil, err
+		}
+		switch e.Executor {
+		case "", "refusing":
+			// The default is to refuse. A capability declared with no executor
+			// named must not silently become one that acts.
+			out = append(out, effect.Refusing{Capability: capability})
+		default:
+			return nil, fmt.Errorf("profile: capability %q names executor %q, which this build does not contain; real integrations are compiled in", e.ID, e.Executor)
+		}
+	}
+	return out, nil
 }
 
 // Validate checks the config for the mistakes that would otherwise surface as
@@ -485,6 +556,10 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 	if err != nil {
 		return Built{}, err
 	}
+	executors, err := c.buildExecutors()
+	if err != nil {
+		return Built{}, err
+	}
 	store, err := c.store()
 	if err != nil {
 		return Built{}, err
@@ -509,6 +584,9 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		YieldToFreshClaims: c.YieldToFreshClaims,
 		MaxAttemptsPerCell: c.MaxAttemptsPerCell,
 		MaxTrustAge:        authority.MaxAge(c.Promotion.MaxTrustAge.D(0)),
+		Executors:          executors,
+		EffectAuthorizedBy: c.Effects.AuthorizedBy,
+		EffectTTL:          int64(c.Effects.TTL.D(0) / time.Second),
 	}
 	cl.Promoter = &promote.Promoter{
 		V:           v,

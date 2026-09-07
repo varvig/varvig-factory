@@ -25,6 +25,7 @@
 package claim
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -47,10 +48,57 @@ import (
 // A ticket with no directive requires nothing, which is the right default: most
 // tickets are ordinary code changes and demanding an annotation on each would
 // make the mechanism something people work around.
+//
+// A ticket may instead — never as well — name an effectful capability, which
+// takes it off the speculation path entirely:
+//
+//	factory-requires: effect=pcb-fabrication@1 interface=1220a1b2…
+//	factory-effect: {"gerber":"…","quantity":5}
+//
+// The two are mutually exclusive because they are opposite kinds of work.
+// `build`/`test` describe a code change that is attempted, scored and promoted;
+// `effect` describes an order that is placed once and cannot be scored, retried
+// or regenerated (§6.7).
 type Requirements struct {
 	Build    []string
 	Test     []string
 	Attempts int
+	// Effect is the effectful capability this ticket needs, if any. The
+	// interface hash is required alongside the alias — an alias alone is
+	// ambiguous between factories (§2.1), and here the ambiguity would be
+	// resolved by spending money.
+	Effect *EffectRequirement
+}
+
+// EffectRequirement is a ticket's declared effectful action.
+type EffectRequirement struct {
+	// Capability is the alias, e.g. "pcb-fabrication@1".
+	Capability string
+	// Interface is the interface hash the alias must resolve to.
+	Interface string
+	// Payload is the action's parameters, verbatim from the directive. It is
+	// kept as raw text rather than parsed here because it is hashed into the
+	// idempotency key: re-encoding it, even correctly, risks two readings of one
+	// ticket producing two keys and therefore two orders.
+	Payload string
+	// Malformed explains why a declared effect cannot be acted on. A ticket that
+	// names an effectful capability badly must not fall through to the ordinary
+	// attempt path — that would answer "order me a circuit board" by writing
+	// code — so the requirement survives with the reason attached.
+	Malformed string
+}
+
+// Effectful reports whether this ticket asks for an effectful action.
+func (r Requirements) Effectful() bool { return r.Effect != nil }
+
+// EffectGrant is one effectful capability a cell is equipped to act on.
+type EffectGrant struct {
+	Capability string
+	// Interface is the hash the alias resolves to for this cell. It is compared
+	// against the ticket's, because a cell holding "pcb-fabrication@1" for a
+	// different interface than the ticket means is not equipped for that ticket
+	// — it is equipped for a different one with the same name (§2.1).
+	Interface string
 }
 
 // Directive is the line prefix that carries requirements.
@@ -83,12 +131,71 @@ func ParseRequirements(spec string) Requirements {
 				if _, err := fmt.Sscanf(value, "%d", &n); err == nil && n > 0 {
 					r.Attempts = n
 				}
+			case "effect":
+				if r.Effect == nil {
+					r.Effect = &EffectRequirement{}
+				}
+				r.Effect.Capability = value
+			case "interface":
+				if r.Effect == nil {
+					r.Effect = &EffectRequirement{}
+				}
+				r.Effect.Interface = value
 			}
 		}
 	}
 	sort.Strings(r.Build)
 	sort.Strings(r.Test)
+
+	if r.Effect != nil {
+		r.Effect.Payload = parsePayload(spec)
+		r.Effect.Malformed = validateEffect(*r.Effect, r)
+	}
 	return r
+}
+
+// PayloadDirective carries an effectful action's parameters as canonical JSON.
+//
+// One line, because canonical JSON contains no newlines (CELL.md §4.3) — the
+// same property that makes note payloads parseable — so a directive line is
+// enough and no block syntax is needed.
+const PayloadDirective = "factory-effect:"
+
+func parsePayload(spec string) string {
+	for _, line := range strings.Split(spec, "\n") {
+		if rest, ok := cutPrefixFold(strings.TrimSpace(line), PayloadDirective); ok {
+			return strings.TrimSpace(rest)
+		}
+	}
+	return ""
+}
+
+// validateEffect returns why a declared effect cannot be acted on, or "".
+//
+// Every one of these is a refusal rather than a correction. This is the class of
+// action where "we assumed you meant X" buys a wrong order.
+func validateEffect(e EffectRequirement, r Requirements) string {
+	switch {
+	case e.Capability == "":
+		return "the ticket names an interface but no effectful capability"
+	case e.Interface == "":
+		return fmt.Sprintf("the ticket names %s by alias with no interface hash; the hash is the identity, and an alias alone is ambiguous between factories (§2.1)", e.Capability)
+	case !cell.IsMultihash(e.Interface):
+		return fmt.Sprintf("%q is not an object hash, so it names no interface", e.Interface)
+	case e.Payload == "":
+		return fmt.Sprintf("the ticket asks for %s but declares no %s parameters", e.Capability, PayloadDirective)
+	case !json.Valid([]byte(e.Payload)):
+		return fmt.Sprintf("the %s parameters are not valid JSON", PayloadDirective)
+	case r.Attempts > 1:
+		// §9.10, at the earliest point it can be caught: rejected, never
+		// clamped. Three attempts at a board order means three invoices, and the
+		// ticket's author is the one who needs to know.
+		return fmt.Sprintf("the ticket asks for %d attempts at %s, and %d orders is what that would mean; an effectful capability is never speculated on",
+			r.Attempts, e.Capability, r.Attempts)
+	case len(r.Build) > 0 || len(r.Test) > 0:
+		return fmt.Sprintf("the ticket asks for %s and also declares build/test requirements; those are opposite kinds of work and a ticket does one of them", e.Capability)
+	}
+	return ""
 }
 
 func cutPrefixFold(s, prefix string) (string, bool) {
@@ -146,6 +253,11 @@ type Inputs struct {
 	// repository. While partitioned this list is simply shorter, and the
 	// duplicate attempts that result are correct.
 	ForeignClaims []cell.Claim
+	// EffectGrants are the effectful capabilities this cell can actually act on:
+	// for each, it holds a lease and has an executor that supports it. A cell
+	// with none — which is most cells — declines every effectful ticket, and
+	// that is the correct default rather than a misconfiguration.
+	EffectGrants []EffectGrant
 	// Offline says upstream is unreachable.
 	Offline bool
 	// YieldToFreshClaims makes the cell skip a task another cell has freshly
@@ -195,6 +307,13 @@ const (
 	// SkipForeignClaim: another cell holds a fresh claim and this cell is
 	// configured to yield. Advisory, and inert across a partition.
 	SkipForeignClaim SkipReason = "another cell holds a fresh claim"
+	// SkipEffectMalformed: the ticket names an effectful capability badly. It is
+	// its own reason rather than folded into SkipCapability because the fix is
+	// the ticket's author's, not the operator's.
+	SkipEffectMalformed SkipReason = "effect declaration is malformed"
+	// SkipNoAuthority: this cell holds no lease, or no executor, for the
+	// capability the ticket needs.
+	SkipNoAuthority SkipReason = "no authority for this effectful capability"
 )
 
 // Evaluate applies the policy.
@@ -203,6 +322,17 @@ const (
 // reported reason is the first thing that would have to change for this cell to
 // attempt this ticket — which is the reason an operator can act on.
 func Evaluate(in Inputs) Verdict {
+	req := in.Ticket.Requirements()
+
+	// An effectful ticket is not attempted, so the attempt role does not gate it.
+	// What gates it is holding a lease — authority to spend, not a declared
+	// toolchain — and a Micro cell with a lease is as entitled to place an order
+	// as a Mini one. Conflating the two would tie the right to spend money to
+	// the presence of a model, which is not a relationship that should exist.
+	if req.Effectful() {
+		return evaluateEffect(in, req)
+	}
+
 	if !in.Capabilities.Has(cell.RoleAttempt) {
 		return Verdict{Skip: SkipNotAttempting, Reason: fmt.Sprintf(
 			"cell %s holds roles %v; attempting is opt-in", in.Capabilities.CellID, roleNames(in.Capabilities.Roles))}
@@ -220,7 +350,6 @@ func Evaluate(in Inputs) Verdict {
 			"%s is blocked by %d ticket(s), as derived by varvig", shortID(in.Ticket.ID), len(in.Ticket.Blockers))}
 	}
 
-	req := in.Ticket.Requirements()
 	if missing := in.Capabilities.Missing(req.Build, req.Test); len(missing) > 0 {
 		return Verdict{Skip: SkipCapability, Reason: fmt.Sprintf(
 			"%s requires %s, which cell %s does not declare",
@@ -291,4 +420,82 @@ func shortID(id string) string {
 		return id
 	}
 	return id[:16] + "…"
+}
+
+// evaluateEffect is the claim decision for a ticket that names an effectful
+// capability (§6.7).
+//
+// It shares the schedulability and politeness checks with the ordinary path and
+// differs in three ways, each for a reason:
+//
+//   - **No role gate.** Authority to spend comes from a lease, not from
+//     declaring a toolchain.
+//   - **No inference-budget gate.** An order is paid from its lease; refusing to
+//     place one because the day's model spend is exhausted would couple two
+//     unrelated budgets, and the coupling would surface as an order that
+//     silently did not happen.
+//   - **One attempt, always.** Not the ticket's default and not the budget's:
+//     the number is 1, and a ticket asking for more was already refused as
+//     malformed.
+func evaluateEffect(in Inputs, req Requirements) Verdict {
+	id := shortID(in.Ticket.ID)
+
+	if req.Effect.Malformed != "" {
+		return Verdict{Skip: SkipEffectMalformed, Reason: fmt.Sprintf("%s: %s", id, req.Effect.Malformed)}
+	}
+	if !in.Ticket.Scope.Declared() {
+		// The same rule as any other ticket. An effectful ticket usually writes
+		// nothing, but it still has to be schedulable — and a ticket nobody
+		// declared a scope for is one varvig cannot order against the rest.
+		return Verdict{Skip: SkipUnschedulable, Reason: fmt.Sprintf(
+			"%s has no declared read/write set, so varvig cannot serialize it", id)}
+	}
+	if strings.EqualFold(in.Ticket.Status, "vetoed") {
+		return Verdict{Skip: SkipVetoed, Reason: fmt.Sprintf("%s is vetoed", id)}
+	}
+	if len(in.Ticket.Blockers) > 0 {
+		return Verdict{Skip: SkipBlocked, Reason: fmt.Sprintf(
+			"%s is blocked by %d ticket(s), as derived by varvig", id, len(in.Ticket.Blockers))}
+	}
+
+	if !hasGrant(in.EffectGrants, *req.Effect) {
+		return Verdict{Skip: SkipNoAuthority, Reason: fmt.Sprintf(
+			"%s needs %s (%s), which cell %s holds no lease and executor for",
+			id, req.Effect.Capability, shortID(req.Effect.Interface), in.Capabilities.CellID)}
+	}
+
+	// One attempt per cell, enforced here as well as by the reservation ref.
+	// Belt and braces is right for this class: the ref is the guarantee, and this
+	// is what stops the cell wasting a claim to discover it.
+	if in.OwnAttempts >= 1 {
+		return Verdict{Skip: SkipAlreadyAttempted, Reason: fmt.Sprintf(
+			"cell %s has already acted on %s; an effectful action is never re-run", in.Capabilities.CellID, id)}
+	}
+
+	if in.YieldToFreshClaims {
+		for _, c := range freshest(in.ForeignClaims, in.Now) {
+			// Yielding matters more here than anywhere else: two cells that both
+			// proceed produce two orders, and only the reservation ref stops
+			// them — which it cannot do across a partition, since each cell
+			// writes under its own prefix.
+			return Verdict{Skip: SkipForeignClaim, Reason: fmt.Sprintf(
+				"cell %s claimed %s until %s; yielding, because two cells acting here means two orders",
+				c.CellID, id, time.Unix(c.NotAfter, 0).UTC().Format(time.RFC3339))}
+		}
+	}
+
+	return Verdict{Claim: true, Attempt: 1, Reason: fmt.Sprintf(
+		"claiming %s to perform %s", id, req.Effect.Capability)}
+}
+
+func hasGrant(grants []EffectGrant, want EffectRequirement) bool {
+	for _, g := range grants {
+		// Both must match. The alias alone would let a cell act on a ticket
+		// meaning a different interface of the same name, and the hash alone
+		// would let it act under a name it was never granted.
+		if g.Capability == want.Capability && g.Interface == want.Interface {
+			return true
+		}
+	}
+	return false
 }

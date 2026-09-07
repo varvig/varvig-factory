@@ -72,6 +72,7 @@ identity is the one thing that cannot be done afterwards.
 | note namespace `factory/environment` | The environment descriptor an evidence record was produced in (§4.2) |
 | note namespace `factory/artifact` | *Legacy.* `artifact-ref` records, for a core without `tickets attach-artifact` (§7) |
 | note namespace `factory/agreement` | Promotion-agreement observations, per scope (§8) |
+| note namespace `factory/effect` | The reservation record for an effectful action taken against a ticket (§8.2) |
 
 `<task-id>` is the varvig ticket id — the genesis intent revision hash, stable
 forever (`TICKETS.md` §1.2). Factory does not mint its own task identity.
@@ -116,6 +117,11 @@ here.
 | `inference.models` | Sorted by `(id, version)`. Empty iff tier is `none`. |
 | `build`, `test` | Sorted, deduplicated capability tokens. Free-form, matched by equality against a ticket's requirements. |
 | `roles` | A non-empty subset of `attempt`, `verify`, `build`, sorted. |
+| `effects` | Effectful capabilities this cell has an integration for (§8.2). Each names an alias **and** its interface hash. Optional, and absent for almost every cell. |
+
+`effects` is **not** authority to spend — that is a lease, which an overseer
+writes and a cell cannot. It says only that this cell has an integration wired
+up. A cell needs both to act, and holding either alone means it declines.
 
 **`roles` is the load-bearing field.** A cell may be a verifier or builder
 without ever attempting (§2.1, §3.3). Micro ships `["build", "verify"]`;
@@ -538,6 +544,72 @@ refusals:
    escalates; retry is an authorized decision, not a loop behaviour. A
    conflicting effectful attempt does not re-run, because the external world has
    already moved.
+
+#### How a ticket asks for one
+
+A ticket names an effectful capability in the same directive that carries build
+and test requirements, with the parameters on a line of their own:
+
+```
+factory-requires: effect=pcb-fabrication@1 interface=1220a1b2…
+factory-effect: {"gerber":"rev-c","quantity":5}
+```
+
+One line for the parameters is enough because canonical JSON contains no
+newlines (§4.3) — the same property that makes note payloads parseable.
+
+Five rules, each a refusal rather than a correction, because this is the class
+of work where "we assumed you meant X" buys a wrong order:
+
+1. **The interface hash is required**, not just the alias.
+2. **The parameters are required and must be valid JSON.** They are kept
+   verbatim and hashed into the idempotency key: re-encoding them, even
+   correctly, risks two readings of one ticket producing two keys and therefore
+   two orders.
+3. **`attempts` may only be 1.** A ticket asking for more is rejected here, at
+   the earliest point it can be caught.
+4. **A ticket does one kind of work.** `build`/`test` and `effect` are mutually
+   exclusive: one describes a change that is attempted, scored and promoted, the
+   other an order placed once.
+5. **A malformed effect never falls through to the attempt path.** Answering
+   "order me a circuit board" by writing code is the failure mode this exists to
+   prevent, so the requirement survives with the reason attached.
+
+An effectful ticket is **not gated by the attempt role**: authority to spend
+comes from a lease, and tying it to holding a model would make the right to
+spend money depend on the presence of a GPU. Nor is it gated by the inference
+budget — an order is paid from its lease, and coupling the two would surface as
+an order that silently did not happen.
+
+#### The lifecycle
+
+    quote → reserve → authorize → execute → settle
+
+Authorization is checked **before** the reservation rather than between it and
+execution: a refusal arriving after the key is claimed has already consumed the
+cell's one chance to act on that ticket. Quoting comes first because a hold
+needs an amount, and for a quoted capability the amount is not known until the
+service is asked.
+
+What happens after execution is decided by *what the cell knows*, not by what it
+hopes:
+
+| Executor returns | Meaning | Lease | Reservation |
+|---|---|---|---|
+| success | the effect happened | hold becomes spend, at the actual price | `done`, with the far end's reference |
+| a definite rejection | **no** effect occurred | hold released | `failed`; the key stays claimed |
+| anything else | **unknown** | hold stands | `pending`; escalates |
+
+The third row is the one implementations get wrong. A timeout, a dropped
+connection and a 500 are all consistent with the order having been placed, so
+only an executor that was *definitely told no* may claim nothing happened. The
+hold is deliberately **not** released on an unknown outcome: the money may be
+gone, and returning it would let the cell spend it twice.
+
+If the effect succeeds and recording it fails, that is the one error that stops
+the pass rather than being counted. The lease still holds rather than spends and
+the reservation still reads pending, so the operator sees an unresolved action
+rather than a clean slate.
 
 #### The reservation is what actually stops the second order
 

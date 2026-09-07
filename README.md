@@ -55,14 +55,16 @@ makes:
 go run ./cmd/factory-demo
 ```
 
-Five phases against in-memory fakes. A Mini cell attempts and a Micro cell
+Six phases against in-memory fakes. A Mini cell attempts and a Micro cell
 independently verifies; gated promotion evaluates every condition and acts on
 none of them; a partition where both cells attempt the same task and both
 attempts survive reconnect; autonomous promotion, earned per scope, stopped two
 different ways by the kill switch; and finally a disconnected cell refused a
 promotion while it goes on spending its lease, reserving, settling above quote,
-and being refused a second pending order and a self-authorized one. No varvig
-binary, no GPU, no network.
+and being refused a second pending order and a self-authorized one; and finally
+a ticket driving a real order through the loop — placed by micro-b, the cell
+with no model at all, because authority to spend is a lease and not a GPU. No
+varvig binary, no GPU, no network.
 
 ## Quick start against a real repository
 
@@ -419,6 +421,66 @@ is on the hash, and an alias match with a hash mismatch is the collision the
 binding exists to catch. The hash is in the idempotency key too, so re-pointing
 an alias cannot make a new action look like an old one.
 
+### A ticket can now order a thing
+
+Until this landed, `authority` and `effect` were a well-tested library with no
+path from a ticket to an order. A ticket names an effectful capability in the
+same directive that carries build and test requirements:
+
+```
+factory-requires: effect=pcb-fabrication@1 interface=1220a1b2…
+factory-effect: {"gerber":"rev-c","quantity":5}
+```
+
+That takes the ticket off the speculation path entirely — it is not attempted,
+scored or promoted, because none of those mean anything for an action that
+happens once in the physical world. Two gates it is *not* subject to:
+
+- **Not the `attempt` role.** Authority to spend is a lease. Tying it to holding
+  a model would make the right to spend money depend on the presence of a GPU, and
+  a Micro cell with a lease is as entitled to place an order as a Mini one.
+- **Not the inference budget.** An order is paid from its lease; coupling the
+  two would surface as an order that silently did not happen.
+
+A cell needs **both** a lease and an executor for a capability. Holding either
+alone means it declines the ticket rather than claiming it and discovering the
+problem afterwards.
+
+The executor is a seam like the model runtime and the build sandbox, and for a
+sharper reason than either: the alternative to a fake is a real board order. Only
+a **refusing** executor is built in — pointing a cell at it proves the wiring
+works, with the ticket claimed, quoted, authorized and reserved, and nothing
+ordered. Real integrations are compiled in by whoever operates the factory,
+because a plugin loader reached by name from a config file, in the one path that
+spends money, is a worse idea than a rebuild.
+
+### What the cell does after it acts
+
+    quote → reserve → authorize → execute → settle
+
+Authorization is checked **before** the reservation, not between it and
+execution: a refusal that arrives after the key is claimed has already consumed
+the cell's one chance to act on that ticket.
+
+What happens next is decided by what the cell *knows*, not by what it hopes:
+
+| Executor returns | Meaning | Lease | Reservation |
+|---|---|---|---|
+| success | the effect happened | hold becomes spend, at the price actually charged | `done`, with the far end's reference |
+| a definite rejection | **no** effect occurred | hold released | `failed`; the key stays claimed |
+| anything else | **unknown** | hold stands | `pending`; escalates |
+
+The third row is the one implementations get wrong. A timeout, a dropped
+connection and a 500 are all consistent with the order having been placed, so
+only an executor that was *definitely told no* may claim nothing happened — and
+the hold is deliberately not released on an unknown outcome, because the money
+may be gone and returning it would let the cell spend it twice.
+
+If the effect succeeds and recording it fails, that is the one error that stops
+the pass rather than being counted: the lease still holds rather than spends and
+the reservation still reads pending, so an operator sees an unresolved action
+rather than a clean slate.
+
 ### Reserve, execute, settle
 
 A derived key says what "the same action" means; it does not stop the action
@@ -554,7 +616,8 @@ authority/           envelopes and leases: shared ceilings versus exclusive
                      allocations, what a stale view still permits, and the refs
                      they live in
 effect/              effectful, non-regenerable capabilities — the refusals,
-                     and reserve/execute/settle over a reservation ref
+                     reserve/execute/settle over a reservation ref, and the
+                     executor seam (with a refusing default and a counting fake)
 claim/               claim policy: should this cell attempt this ticket?
 loop/                the ten-step cell loop, and verification of peer attempts
 gate/                the wasm promotion-policy module interface
@@ -639,6 +702,28 @@ tickets are ordinary code changes, and demanding an annotation on each would mak
 the mechanism something people work around. Unknown keys are ignored rather than
 rejected, so a ticket written for a newer Factory is still attemptable by an
 older cell.
+
+A ticket may **instead** name an effectful capability, which takes it off the
+speculation path entirely (see [above](#a-ticket-can-now-order-a-thing)):
+
+```
+factory-requires: effect=pcb-fabrication@1 interface=1220a1b2…
+factory-effect: {"gerber":"rev-c","quantity":5}
+```
+
+Here the tolerance above is inverted, and every rule is a refusal rather than a
+correction — this is the class of work where "we assumed you meant X" buys a
+wrong order. The interface hash is required, not just the alias. The parameters
+are required, must be valid JSON, and are kept **verbatim**, because they are
+hashed into the idempotency key and re-encoding them (even correctly) risks two
+readings of one ticket producing two keys and therefore two orders. `attempts`
+may only be 1. And a ticket does one kind of work: `build`/`test` and `effect`
+are mutually exclusive.
+
+**A malformed effect never falls through to the attempt path.** Answering "order
+me a circuit board" by writing code is the failure mode that rule exists to
+prevent, so the requirement survives with the reason attached and the ticket is
+skipped rather than reinterpreted.
 
 ## Claims
 
@@ -772,7 +857,7 @@ with the contract-level detail.
 | Gap | What is missing |
 |---|---|
 | **No rendezvous set** (§3.0) | The loop takes a single `upstream` address. It is not a coordinator, but "any member may act as a rendezvous, several at once" is not implemented, so a factory does not yet keep working when that particular member is unreachable. |
-| **No interface registry** (§2.1) | A capability reference already binds to the interface *hash*, which is the part that matters for safety. What is missing is the registry the hash points into: interfaces published as varvig objects and resolvable by hash. |
+| **No interface registry** (§2.1) | A capability reference already binds to the interface *hash*, which is the part that matters for safety — a ticket, a cell's configuration and a lease must all name the same hash before anything is ordered. What is missing is the registry the hash points into: interfaces published as varvig objects and resolvable by hash. |
 | **No derived reputation** (§2.2) | Capability claims are advisory and standing should be derived from promotion history. Only the agreement-rate metric is derived today, and it is per scope rather than per cell. |
 | **Money is a `float64`** | Amounts accumulate representation error — 1000 − 320 − 355.40 is 44.60000000000002 — and refusals round for display. No decision compares amounts for equality, so nothing turns on it today, but minor units are the right representation for a system that spends money. |
 

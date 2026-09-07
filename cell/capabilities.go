@@ -64,6 +64,23 @@ type Capabilities struct {
 	Build     []string  `json:"build,omitempty"`
 	Test      []string  `json:"test,omitempty"`
 	Roles     []Role    `json:"roles"`
+	// Effects are the effectful capabilities this cell is configured to perform
+	// (CELL.md §8.2). Declaring one is not authority to spend — that comes from
+	// a lease — it says only that this cell has an executor wired up for it.
+	//
+	// It is a static fact, so it belongs here: which integrations a cell has is
+	// changed by an operator editing configuration, never by the cell itself.
+	Effects []EffectCapability `json:"effects,omitempty"`
+}
+
+// EffectCapability names one effectful capability a cell can perform.
+type EffectCapability struct {
+	// ID is the alias, e.g. "pcb-fabrication@1".
+	ID string `json:"id"`
+	// Interface is the interface hash the alias resolves to for this cell. It is
+	// required: two factories may use one alias for different interfaces, and
+	// here that ambiguity would be resolved by spending money (§2.1).
+	Interface string `json:"interface"`
 }
 
 // Normalize sorts and deduplicates every list so that two cells configured
@@ -134,6 +151,24 @@ func (c Capabilities) Validate() error {
 	// advisory, other cells would still see and consider.
 	if c.Has(RoleAttempt) && c.Inference.Tier == TierNone {
 		return fmt.Errorf("cell: role %q requires an inference tier other than %q", RoleAttempt, TierNone)
+	}
+	seen := map[string]bool{}
+	for _, e := range c.Effects {
+		if e.ID == "" {
+			return fmt.Errorf("cell: effectful capability with empty id")
+		}
+		if e.Interface == "" {
+			return fmt.Errorf("cell: effectful capability %q declares no interface hash; the hash is the identity, and an alias alone is ambiguous between factories", e.ID)
+		}
+		if !IsMultihash(e.Interface) {
+			return fmt.Errorf("cell: effectful capability %q names interface %q, which is not an object hash", e.ID, e.Interface)
+		}
+		if seen[e.ID] {
+			// Two entries for one alias would make "which interface does this
+			// cell mean by that name" ambiguous at the moment of spending.
+			return fmt.Errorf("cell: effectful capability %q is declared twice", e.ID)
+		}
+		seen[e.ID] = true
 	}
 	return nil
 }
