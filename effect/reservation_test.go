@@ -41,6 +41,18 @@ func after(g authority.Grant, c Claim) authority.Grant {
 	return authority.Grant{Envelope: g.Envelope, Lease: &c.Lease, LeaseHash: c.LeaseHash}
 }
 
+// acting reserves and then takes, which is what the in-process path does: a
+// fresh reservation is only *offered*, and taking it is what says something is
+// now acting on it and the outcome is no longer known to be nothing.
+func acting(t *testing.T, v varvigcli.Varvig, req Request, cellID string, g authority.Grant, at, ttl int64) (Claim, error) {
+	t.Helper()
+	c, err := Reserve(v, req, cellID, g, at, ttl)
+	if err != nil {
+		return c, err
+	}
+	return TakeSelf(v, c, at)
+}
+
 // Test11b_ReservationExecutesOnce is the durable half of FACTORY.md §9.11.
 // Deriving a stable key says what "the same action" means; claiming it in a ref
 // before executing is what actually stops the second order.
@@ -49,12 +61,12 @@ func Test11b_ReservationExecutesOnce(t *testing.T) {
 	v, g := leased(t, 1000, 20)
 	req := order(t, c)
 
-	claim, err := Reserve(v, req, "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, req, "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatalf("first reservation refused: %v", err)
 	}
 	if claim.Reservation.State != StatePending {
-		t.Fatalf("a fresh reservation is %q, want pending: the effect has not happened yet", claim.Reservation.State)
+		t.Fatalf("a taken reservation is %q, want pending: something is acting and the outcome is unknown", claim.Reservation.State)
 	}
 
 	// The cell places the order, then records the far end's identifier for it.
@@ -106,7 +118,7 @@ func Test11c_HoldsPreventTwoPendingOrdersExceedingTheLease(t *testing.T) {
 
 	first := order(t, c)
 	first.Amount, first.Quantity = 700, 5
-	claim, err := Reserve(v, first, "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, first, "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatalf("the first order was refused: %v", err)
 	}
@@ -136,7 +148,7 @@ func Test11c_HoldsPreventTwoPendingOrdersExceedingTheLease(t *testing.T) {
 	v2, g2 := leased(t, 100000, 10)
 	bulk := order(t, c)
 	bulk.Amount, bulk.Quantity = 10, 10
-	held, err := Reserve(v2, bulk, "mini-a", g2, at.Unix(), 3600)
+	held, err := acting(t, v2, bulk, "mini-a", g2, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +167,7 @@ func Test14_ReservationExpiry(t *testing.T) {
 	v, g := leased(t, 1000, 20)
 	req := order(t, c)
 
-	claim, err := Reserve(v, req, "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, req, "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +220,7 @@ func TestResolvingAnExpiredReservationThatDidHappenStillCharges(t *testing.T) {
 	// the order really was placed. The money must still leave the lease.
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
-	claim, err := Reserve(v, order(t, c), "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +257,7 @@ func TestTheSameCellCannotReserveOneKeyTwice(t *testing.T) {
 	v, g := leased(t, 1000, 20)
 	req := order(t, c)
 
-	claim, err := Reserve(v, req, "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, req, "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,7 +286,7 @@ func TestPendingIsTheStateThatEscalates(t *testing.T) {
 	// order was placed.
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
-	claim, err := Reserve(v, order(t, c), "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +345,7 @@ func TestASettledSpendMustBeLookUpAble(t *testing.T) {
 	// the answer has to be in the record.
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
-	claim, err := Reserve(v, order(t, c), "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -356,7 +368,7 @@ func TestSettlementRecordsActualAgainstQuoted(t *testing.T) {
 	// absorbing.
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
-	claim, err := Reserve(v, order(t, c), "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +386,7 @@ func TestSettlementRecordsActualAgainstQuoted(t *testing.T) {
 	// An actual that would push the lease past its allocation is refused: the
 	// lease cannot record a state it says is invalid.
 	v2, g2 := leased(t, 400, 20)
-	claim2, err := Reserve(v2, order(t, c), "mini-a", g2, at.Unix(), 3600)
+	claim2, err := acting(t, v2, order(t, c), "mini-a", g2, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +401,7 @@ func TestAFailedActionReleasesItsHoldButKeepsItsKey(t *testing.T) {
 	// decision for a higher principal, not a loop behaviour (§6.7 rule 5).
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
-	claim, err := Reserve(v, order(t, c), "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +427,7 @@ func TestReservationRecordsTheInterfaceHash(t *testing.T) {
 	// contract, even if the alias has since been re-pointed (§2.1).
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
-	claim, err := Reserve(v, order(t, c), "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +495,7 @@ func TestIntegrationReservationRefsAreAccepted(t *testing.T) {
 
 	c := fabrication(t)
 	req := order(t, c)
-	claim, err := Reserve(v, req, "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, req, "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatalf("real core refused a reservation ref: %v", err)
 	}
@@ -607,7 +619,7 @@ func Test12b_TighteningBelowWhatIsAlreadySpent(t *testing.T) {
 	// nothing further to give.
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
-	claim, err := Reserve(v, order(t, c), "mini-a", g, at.Unix(), 3600)
+	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}

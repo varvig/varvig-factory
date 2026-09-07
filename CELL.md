@@ -611,6 +611,54 @@ the pass rather than being counted. The lease still holds rather than spends and
 the reservation still reads pending, so the operator sees an unresolved action
 rather than a clean slate.
 
+#### Connectors: how a vendor gets added without a rebuild
+
+A capability is performed either **in-process** or by a **connector peer**. The
+second is the one that matters for anything real, and it is modelled on how core
+does tracker bridges: a separate peer, holding its own credentials, that core
+"never learns the vendor's name" of, untrusted, and therefore able to run
+anywhere.
+
+The reason to prefer it here is sharper than for bridges. An executor holds
+credentials to a service that charges money. Compiling vendors into the cell
+binary would mean a rebuild to add one and those credentials living in the
+cell's process; a connector holds its own and needs neither.
+
+**The interface is repository state, not an ABI.** There is nothing to load,
+nothing to link, and no version to keep in step:
+
+| | |
+|---|---|
+| cell | **offers** a reservation naming a capability |
+| connector | **takes** it by compare-and-swap, recording who it is |
+| connector | **executes** against the vendor |
+| connector | **reports** the outcome — an order number and what it cost |
+| cell | **settles** the lease from that report |
+
+The last line must not move. A connector reports; only the cell spends. That is
+the containment core applies to a bridge, which may sign a weak attestation and
+never a strong one: the untrusted peer states a fact, and the trusted layer
+applies it under rules. Here the rule is the lease, so **a connector that lies
+about cost is bounded by an amount the overseer chose deliberately** — a
+settlement beyond the allocation is refused outright.
+
+A connector cannot create a reservation, so it cannot invent work for itself; it
+cannot raise a lease or widen an envelope; it cannot settle; and it cannot take
+a reservation another connector holds. What it can do is claim an outcome for an
+action a cell reserved and an overseer authorized — and be wrong about it, within
+that lease.
+
+Two connectors racing produce one holder and one refusal, using varvig's
+ordinary ref CAS rather than a lock, a lease or a queue. Passing the take
+deadline does **not** hand the work to somebody else: by then the holder may
+have reached the vendor, and a second connector acting is exactly the double
+order this exists to prevent. A stale claim escalates.
+
+**A connector that does not know reports nothing.** "We never heard back" is not
+a report; the reservation stands as `pending` and escalates. A connector that
+guesses is worse than one that goes quiet, so the shapes that would let it guess
+— a success with no reference, a rejection with no refusal — are refused.
+
 #### The reservation is what actually stops the second order
 
 Deriving a stable key says what "the same action" means. It does not by itself
@@ -624,9 +672,19 @@ The order is deliberately the pessimistic one — reserve, execute, settle:
 
 | State | Meaning | Who may clear it |
 |---|---|---|
-| `pending` | reserved, and **possibly executed** — the cell does not know which | a higher principal, after checking the external system |
+| `offered` | reserved and waiting for something to act on it — **nothing has happened yet** | the expiry, which returns the headroom |
+| `pending` | taken, and **possibly executed** — nobody knows which | a higher principal, after checking the external system |
+| `reported` | an executor claims an outcome the lease has not been settled from yet | the cell, on its next pass |
 | `done` | the effect is confirmed to have happened; carries the far end's own reference | — |
 | `failed` | the external service is confirmed to have **rejected** it, so no effect occurred | — |
+
+The line that matters runs between `offered` and `pending`. Before anything
+takes the reservation nothing has happened and the headroom is safe to return;
+from the moment something takes it the outcome is unknown and the key is claimed
+for good. Collapsing the two would make a reservation nobody touched look like an
+order in flight — or, worse, the reverse. `reported` is separate for a different
+reason: a connector reports and only the cell spends, and those are two writes
+that cannot be one.
 
 A reservation also **holds lease headroom** for as long as it is outstanding
 (§7.1). Without that, two pending actions would each check the same headroom,

@@ -405,3 +405,81 @@ func TestASecondPassDoesNotEvenRequote(t *testing.T) {
 		t.Fatal("a different order was treated as already done")
 	}
 }
+
+func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
+	// The whole exchange through the wired cell: the cell offers, a connector
+	// takes and reports, and a later pass settles. The connector here is just
+	// test code calling the protocol — which is the point, since a real one is a
+	// separate process doing exactly this.
+	c, v, fake := effectCell(t, 1000)
+	iface := boardInterface(t)
+	c.Connectors = map[string]bool{iface: true}
+
+	res, err := c.performEffect(context.Background(), effectTicket(t, v))
+	if err != nil {
+		t.Fatalf("offering: %v", err)
+	}
+	if !res.Offered || res.Done {
+		t.Fatalf("a connector-served capability was executed in-process: %+v", res)
+	}
+	if fake.Count() != 0 {
+		t.Fatal("the in-process executor ran for a connector-served capability")
+	}
+	// The headroom is committed at the offer: a connector may pick it up at any
+	// moment and the cell cannot take that back.
+	held, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.Reserved != 320 {
+		t.Fatalf("reserved = %g at the offer, want 320", held.Reserved)
+	}
+
+	// A connector, elsewhere.
+	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: iface, Effectful: true}
+	awaiting, err := effect.Awaiting(v, capability)
+	if err != nil || len(awaiting) != 1 {
+		t.Fatalf("awaiting = %+v (err %v)", awaiting, err)
+	}
+	taken, err := effect.Take(v, "mini-a", awaiting[0].Key, "fab-connector", effClock.Unix()+1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := effect.Report(v, taken, "fab-connector", true, "PO-77", 341.20, "2 layer", effClock.Unix()+60); err != nil {
+		t.Fatal(err)
+	}
+
+	// A later pass settles it. Driven through Once, because a report lands long
+	// after the pass that offered it and usually while the cell is doing
+	// something else.
+	rep, err := c.Once(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settled *EffectResult
+	for i := range rep.Effects {
+		if rep.Effects[i].ExternalRef == "PO-77" {
+			settled = &rep.Effects[i]
+		}
+	}
+	if settled == nil || !settled.Done {
+		t.Fatalf("the report was not settled: %+v", rep.Effects)
+	}
+	after, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Spent != 341.20 || after.Reserved != 0 {
+		t.Fatalf("after settlement: spent=%g reserved=%g", after.Spent, after.Reserved)
+	}
+	// And it does not settle twice on the pass after that.
+	again, err := c.Once(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range again.Effects {
+		if e.ExternalRef == "PO-77" {
+			t.Fatalf("a settled report was settled again: %+v", e)
+		}
+	}
+}

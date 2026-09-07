@@ -47,6 +47,10 @@ type EffectResult struct {
 	// Refused, with Reason, means nothing happened and why.
 	Refused bool
 	Reason  string
+	// Offered means the reservation is waiting for a connector to take it. The
+	// cell has committed the headroom and done everything it can; the effect has
+	// not happened yet.
+	Offered bool
 	Amount  float64
 	Unit    string
 }
@@ -55,6 +59,8 @@ func (r EffectResult) String() string {
 	switch {
 	case r.Done:
 		return fmt.Sprintf("%s %s: done ref=%s (%.2f %s)", shortID(r.Task), r.Capability, r.ExternalRef, r.Amount, r.Unit)
+	case r.Offered:
+		return fmt.Sprintf("%s %s: offered to a connector (%.2f %s held)", shortID(r.Task), r.Capability, r.Amount, r.Unit)
 	case r.Unresolved:
 		return fmt.Sprintf("%s %s: UNRESOLVED — may have happened, escalating: %s", shortID(r.Task), r.Capability, r.Reason)
 	default:
@@ -165,6 +171,26 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 	}
 	res.Key = claimed.Reservation.Key
 
+	// If a connector serves this capability, the cell's part is done: the offer
+	// stands in the repository and whichever connector holds credentials for the
+	// vendor takes it. The cell settles the report on a later pass.
+	if c.Connectors[capability.Interface] {
+		offered, err := effect.Offer(c.V, claimed, c.now().Unix()+c.EffectTTL)
+		if err != nil {
+			return res, fmt.Errorf("%s: offering to a connector: %w", shortID(t.ID), err)
+		}
+		res.Offered = true
+		res.Reason = fmt.Sprintf("offered to a connector for %s", e.Capability)
+		return res, c.recordEffect(t, offered.Reservation)
+	}
+
+	// In-process: the cell takes its own reservation before acting, so there is
+	// one answer to "who holds this" whichever path produced it.
+	claimed, err = effect.TakeSelf(c.V, claimed, c.now().Unix())
+	if err != nil {
+		return res, fmt.Errorf("%s: taking its own reservation: %w", shortID(t.ID), err)
+	}
+
 	// Execute. Everything after this point is about recording what happened,
 	// because the money may already be gone.
 	outcome, execErr := executor.Execute(ctx, action, claimed.Reservation.Key)
@@ -262,4 +288,64 @@ func (c *Cell) priorEffect(t claim.Ticket) int {
 		return 0
 	}
 	return 1
+}
+
+// settleReports applies connector reports to the leases they draw on.
+//
+// This is the cell's half of the connector exchange, and it runs every pass
+// rather than only after offering: a report may land long after the pass that
+// offered it, and it may land while the cell is restarting. The state is in the
+// repository, so picking it up later is the normal case rather than recovery.
+//
+// A report is a claim about the world made by an untrusted peer. What bounds it
+// is the lease — Convert refuses an actual beyond the allocation — so a
+// connector reporting a wild figure costs at most an amount the overseer chose.
+func (c *Cell) settleReports() ([]EffectResult, []string) {
+	reported, err := effect.Reported(c.V, c.Capabilities.CellID)
+	if err != nil {
+		return nil, []string{"reading connector reports: " + err.Error()}
+	}
+
+	var out []EffectResult
+	var errs []string
+	for _, r := range reported {
+		res := EffectResult{
+			Task: r.Task, Capability: r.Capability, Key: r.Key,
+			Amount: r.Amount, Unit: r.Unit,
+		}
+		lease, leaseHash, err := authority.LoadLease(c.V, c.Capabilities.CellID, r.Capability)
+		if err != nil {
+			// The report stands and the money is still held; the next pass tries
+			// again. Not settling is safe, and inventing a lease would not be.
+			errs = append(errs, fmt.Sprintf("settling %s: no lease: %v", short(r.Key), err))
+			continue
+		}
+		claim, err := effect.LoadClaim(c.V, c.Capabilities.CellID, r.Key, lease, leaseHash)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("settling %s: %v", short(r.Key), err))
+			continue
+		}
+		settled, err := effect.SettleReported(c.V, claim, c.now().Unix())
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("settling %s: %v", short(r.Key), err))
+			continue
+		}
+		res.Done = settled.Reservation.State == effect.StateDone
+		res.ExternalRef = settled.Reservation.ExternalRef
+		res.Refused = !res.Done
+		res.Reason = settled.Reservation.Detail
+		if settled.Reservation.Actual > 0 {
+			res.Amount = settled.Reservation.Actual
+		}
+		out = append(out, res)
+		c.logf("settled a connector report: %s", res)
+	}
+	return out, errs
+}
+
+func short(h string) string {
+	if len(h) <= 12 {
+		return h
+	}
+	return h[:12] + "…"
 }

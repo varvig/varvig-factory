@@ -452,13 +452,41 @@ a **refusing** executor exists so far — pointing a cell at it proves the wirin
 works, with the ticket claimed, quoted, authorized and reserved, and nothing
 ordered.
 
-**This is not yet the extension point.** Adding a vendor by rebuilding the cell
-binary makes no sense, and it would put that vendor's credentials in the cell
-process. Vendors will arrive as **connector peers** answering reservations from
-the repository — the shape core already uses for tracker bridges, where the
-connector holds the external credentials, is untrusted, runs anywhere, and needs
-no recompile. That protocol is the next piece of work; what is here is the
-in-process default it will sit alongside.
+**Vendors are connector peers, not compiled-in code.** Adding one by rebuilding
+the cell binary makes no sense, and it would put that vendor's credentials in the
+cell process. So a real capability is performed by a separate peer, modelled on
+how core does tracker bridges: it holds its own credentials, is untrusted, and
+runs anywhere.
+
+```
+cell       offers    a reservation naming a capability
+connector  takes     it by compare-and-swap, recording who it is
+connector  executes  against the vendor
+connector  reports   an order number and what it cost
+cell       settles   the lease from that report
+```
+
+**The interface is repository state, not an ABI** — nothing to load, nothing to
+link, no version to keep in step. Configuration says only `executor:
+"connector"`; there is no vendor name in it and there never will be.
+
+The last line is the one that must not move: **a connector reports, only the cell
+spends.** That is the containment core applies to a bridge, which may sign a weak
+attestation and never a strong one — the untrusted peer states a fact and the
+trusted layer applies it under rules. Here the rule is the lease, so a connector
+that lies about cost is bounded by an amount the overseer chose: a settlement
+beyond the allocation is refused outright, and a test asserts it.
+
+A connector cannot create a reservation, raise a lease, widen an envelope,
+settle, or take work another connector holds. Two racing produce one holder and
+one refusal, on varvig's ordinary ref CAS — verified against a real core, because
+against the in-memory fake that CAS is a map with a mutex and only the real thing
+can say they agree.
+
+Passing the take deadline does **not** hand the work to somebody else: by then the
+holder may have reached the vendor. A stale claim escalates. And a connector that
+does not know **reports nothing** — "we never heard back" is not a report, so a
+success with no reference and a rejection with no refusal are both refused.
 
 ### What the cell does after it acts
 

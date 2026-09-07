@@ -44,3 +44,42 @@ func TestEffectConfigWiresCapabilitiesAndDefaultsToRefusing(t *testing.T) {
 		t.Fatalf("an unknown executor name gave %v", err)
 	}
 }
+
+func TestConnectorServedCapabilitiesGetNoInProcessExecutor(t *testing.T) {
+	iface := "1220a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+	c := Mini("mini-a")
+	c.Effects = EffectConfig{
+		AuthorizedBy: "overseer-a",
+		Capabilities: []EffectCapabilityConfig{
+			{ID: "pcb-fabrication@1", Interface: iface, Executor: "connector"},
+			{ID: "shipping@1", Interface: iface, Executor: "refusing"},
+		},
+	}
+
+	ex, err := c.buildExecutors()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the refusing one is in-process; the connector-served capability has
+	// nothing here by design, because it is performed in another process.
+	if len(ex) != 1 {
+		t.Fatalf("built %d in-process executors, want 1", len(ex))
+	}
+	served := c.connectorCapabilities()
+	if !served[iface] {
+		t.Fatalf("the connector-served capability was not marked: %v", served)
+	}
+
+	// Both still reach the published capabilities: what a cell can perform is a
+	// static fact whether or not it performs it in-process.
+	if len(c.Capabilities().Effects) != 2 {
+		t.Fatalf("effects = %+v, want both declared", c.Capabilities().Effects)
+	}
+
+	// A cell with no connector-served capability reports none, rather than an
+	// empty map that reads as "configured, but nothing in it".
+	c.Effects.Capabilities = []EffectCapabilityConfig{{ID: "shipping@1", Interface: iface}}
+	if c.connectorCapabilities() != nil {
+		t.Fatal("a cell with no connector capabilities reported a set")
+	}
+}
