@@ -254,18 +254,18 @@ type EffectCapabilityConfig struct {
 	// here the ambiguity would be resolved by spending money (§2.1).
 	ID        string `json:"id"`
 	Interface string `json:"interface"`
-	// Executor names the in-process integration. Only "refusing" exists so far —
-	// it declines every action, which is how an operator proves the wiring works
-	// without anything being ordered.
+	// Executor selects how this capability is performed:
 	//
-	// This field is **not** the extension point, and is not meant to grow a
-	// vendor list. Adding a vendor by rebuilding the cell binary makes no sense,
-	// and it would put that vendor's credentials in the cell process. The
-	// extension point is a connector peer answering reservations from the
-	// repository — the shape core already uses for tracker bridges, where the
-	// connector holds the vendor's credentials, runs anywhere, and needs no
-	// recompile. That protocol is the next piece of work; until it lands, this
-	// selects between the built-ins.
+	//	"connector"  a connector peer takes the offer and reports (the default
+	//	             for anything real: it holds the vendor's credentials, runs
+	//	             anywhere, and needs no rebuild to add)
+	//	"refusing"   declines every action in-process, which is how an operator
+	//	             proves the wiring works without anything being ordered
+	//
+	// There is no vendor name here and there never will be. Adding a vendor by
+	// rebuilding the cell binary makes no sense, and it would put that vendor's
+	// credentials in the cell's process — so vendors arrive as connector peers,
+	// the shape core already uses for tracker bridges.
 	Executor string `json:"executor,omitempty"`
 }
 
@@ -434,12 +434,17 @@ func (c Config) buildExecutors() (effect.Executors, error) {
 			return nil, err
 		}
 		switch e.Executor {
+		case "connector":
+			// Performed elsewhere: no in-process executor, and the loop offers
+			// the reservation rather than acting on it.
+			continue
 		case "", "refusing":
-			// The default is to refuse. A capability declared with no executor
-			// named must not silently become one that acts.
+			// A capability declared with no executor named must not silently
+			// become one that acts.
 			out = append(out, effect.Refusing{Capability: capability})
 		default:
-			return nil, fmt.Errorf("profile: capability %q names in-process executor %q, which this build does not contain; vendor integrations arrive as connector peers rather than by name here", e.ID, e.Executor)
+			return nil, fmt.Errorf("profile: capability %q names executor %q; the choices are %q and %q, and vendor integrations arrive as connector peers rather than by name here",
+				e.ID, e.Executor, "connector", "refusing")
 		}
 	}
 	return out, nil
@@ -593,6 +598,7 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		MaxAttemptsPerCell: c.MaxAttemptsPerCell,
 		MaxTrustAge:        authority.MaxAge(c.Promotion.MaxTrustAge.D(0)),
 		Executors:          executors,
+		Connectors:         c.connectorCapabilities(),
 		EffectAuthorizedBy: c.Effects.AuthorizedBy,
 		EffectTTL:          int64(c.Effects.TTL.D(0) / time.Second),
 	}
@@ -753,6 +759,25 @@ func (c Config) checks() []loop.Check {
 			Timeout: chk.Timeout.D(0),
 			Kind:    kind,
 		})
+	}
+	return out
+}
+
+// connectorCapabilities names, by interface hash, the capabilities this cell
+// leaves to a connector peer.
+//
+// Keyed by hash rather than alias because a connector serving a different
+// interface under the same name is serving a different capability, and here that
+// mistake would be resolved by spending money.
+func (c Config) connectorCapabilities() map[string]bool {
+	out := map[string]bool{}
+	for _, e := range c.Effects.Capabilities {
+		if e.Executor == "connector" {
+			out[e.Interface] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

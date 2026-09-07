@@ -112,6 +112,14 @@ type Cell struct {
 	// lapses (§9.14). Zero means no expiry, which is only right for a capability
 	// that always answers synchronously.
 	EffectTTL int64
+	// Connectors names, by interface hash, the capabilities served by a connector
+	// peer rather than in-process. For those the cell offers the reservation and
+	// settles the report; it never touches the vendor.
+	//
+	// Keyed by hash and not by alias, because a connector serving a different
+	// interface under the same name is serving a different capability (§2.1) and
+	// here that mistake would be resolved by spending money.
+	Connectors map[string]bool
 
 	Now func() time.Time
 	Log func(string)
@@ -375,6 +383,14 @@ func (c *Cell) Once(ctx context.Context) (Report, error) {
 				rep.Errors = append(rep.Errors, "push: "+err.Error())
 			}
 		}
+	}
+
+	// Connector reports land whenever a connector finishes, which is rarely the
+	// pass that offered the work. Settling them is therefore its own step rather
+	// than something bolted to the effectful branch.
+	if settled, errs := c.settleReports(); len(settled) > 0 || len(errs) > 0 {
+		rep.Effects = append(rep.Effects, settled...)
+		rep.Errors = append(rep.Errors, errs...)
 	}
 
 	// Step 10: promotion policy.

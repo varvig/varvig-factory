@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/cell"
@@ -42,11 +43,29 @@ type State string
 
 // The states. There is no "retrying": a failed effectful action escalates, and
 // retry is an authorized decision made by a higher principal (§6.7 rule 5).
+//
+// The line that matters runs between StateOffered and StatePending. Before
+// anything takes the reservation, nothing has happened and the key is safe to
+// release; from the moment something takes it, the outcome is unknown and the
+// key is claimed for good. Collapsing those two into one state would make a
+// reservation nobody has touched look like an order that may be in flight, or
+// worse, the reverse.
 const (
-	// StatePending means reserved and possibly executed. The cell does not know
-	// which, so nobody may act on the key until a principal resolves it.
+	// StateOffered means reserved and waiting for something to act on it.
+	// **Nothing has happened yet**, so this is the one unresolved state that is
+	// safe to abandon.
+	StateOffered State = "offered"
+	// StatePending means taken and possibly executed. Whoever holds it may have
+	// reached the external service already, so nobody may act on the key until a
+	// principal resolves it.
 	StatePending State = "pending"
-	// StateDone means the external effect is confirmed to have happened.
+	// StateReported means an executor has claimed an outcome that the lease has
+	// not been settled from yet. It is a distinct state because the report and
+	// the settlement are two writes that cannot be one: a connector reports, and
+	// only the cell may move money on a lease.
+	StateReported State = "reported"
+	// StateDone means the external effect is confirmed to have happened and the
+	// lease is settled.
 	StateDone State = "done"
 	// StateFailed means the external service is confirmed to have rejected it,
 	// so no effect occurred. Only a definite rejection earns this — a timeout is
@@ -79,12 +98,31 @@ type Reservation struct {
 	// when the reservation lapses: the key stays claimed for good, because an
 	// action whose outcome was never learned may have happened.
 	ExpiresAt int64 `json:"expires_at,omitempty"`
+	// TakenBy is the executor that holds this reservation, and TakenAt when it
+	// took it. Empty while the reservation is merely offered.
+	//
+	// Recording the holder is what makes an offer safe to publish: whoever wins
+	// the compare-and-swap acts, and everyone else sees a name that is not
+	// theirs. It is also the first thing an operator wants when a reservation
+	// has gone quiet — "which process was supposed to be doing this".
+	TakenBy string `json:"taken_by,omitempty"`
+	TakenAt int64  `json:"taken_at,omitempty"`
+	// TakeDeadline is when the holder's claim goes stale. Passing it does **not**
+	// release the reservation — the holder may have reached the vendor — it only
+	// says the holder has stopped reporting, which is a thing to escalate rather
+	// than a thing to retry.
+	TakeDeadline int64 `json:"take_deadline,omitempty"`
 	// HoldReleased records that the lease headroom for this reservation is no
 	// longer held — because it settled, was rejected, or expired. It is tracked
 	// on the reservation so a release cannot be applied twice to the lease.
 	HoldReleased bool `json:"hold_released,omitempty"`
 	// Actual is the settled cost when it differed from the quoted Amount.
 	Actual float64 `json:"actual,omitempty"`
+	// Happened records a connector's claim about the world: true when the effect
+	// occurred, false when the service definitely refused. It is stored rather
+	// than inferred from ExternalRef, so a rejection and a success stay
+	// distinguishable without reading a string for meaning.
+	Happened bool `json:"happened,omitempty"`
 	// ExternalRef is the external system's own identifier — the order number,
 	// the contract id. It is what makes a pending reservation resolvable by a
 	// human or an overseer agent looking the action up at the far end.
@@ -95,8 +133,23 @@ type Reservation struct {
 	SettledAt  int64  `json:"settled_at,omitempty"`
 }
 
-// Unresolved reports whether this reservation blocks further action on its key.
+// Unresolved reports whether this reservation's outcome is unknown — the state
+// that escalates, because the action may have happened and nobody can say.
+//
+// StateOffered is deliberately not unresolved: nothing has taken it, so nothing
+// has happened. StateReported is not either: the outcome is known and only the
+// bookkeeping is outstanding.
 func (r Reservation) Unresolved() bool { return r.State == StatePending }
+
+// Open reports whether this reservation still needs something to happen —
+// whether that is an executor taking it, or the cell settling a report.
+func (r Reservation) Open() bool {
+	switch r.State {
+	case StateOffered, StatePending, StateReported:
+		return true
+	}
+	return false
+}
 
 func (r Reservation) String() string {
 	s := fmt.Sprintf("%s %s/%s %s", short(r.Key), r.CellID, r.Capability, r.State)
@@ -219,12 +272,16 @@ func Reserve(v varvigcli.Varvig, req Request, executingCell string, grant author
 	if ttl > 0 {
 		expires = at + ttl
 	}
+	// A fresh reservation is *offered*: the headroom is held, and nothing has
+	// touched the vendor. The caller decides what happens next — an in-process
+	// executor takes it immediately, a connector-served one is left for whichever
+	// connector picks it up.
 	r := Reservation{
 		Key: key, CellID: executingCell, Task: req.Task,
 		Capability: req.Capability.ID, Interface: req.Capability.Interface,
 		Amount: req.Amount, Unit: req.Unit, Quantity: req.Quantity,
 		AuthorizedBy: req.AuthorizedBy,
-		State:        StatePending, ReservedAt: at, ExpiresAt: expires,
+		State:        StateOffered, ReservedAt: at, ExpiresAt: expires,
 	}
 	hash, err := writeReservation(v, name, r, "")
 	if err != nil {
@@ -265,6 +322,9 @@ func Settle(v varvigcli.Varvig, c Claim, externalRef string, actual float64, at 
 	}
 	if c.Reservation.HoldReleased {
 		return c, fmt.Errorf("effect: the hold for %s is already released; settling again would spend the lease twice", short(c.Reservation.Key))
+	}
+	if err := c.hasLease(); err != nil {
+		return c, err
 	}
 	if actual == 0 {
 		actual = c.Reservation.Amount
@@ -307,6 +367,9 @@ func Fail(v varvigcli.Varvig, c Claim, reason string, at int64) (Claim, error) {
 		return c, errors.New("effect: recording a failure needs the rejection it is based on; without one this is a timeout, which stays pending")
 	}
 	r := c.Reservation
+	if err := c.hasLease(); err != nil {
+		return c, err
+	}
 	r.State, r.Detail, r.SettledAt = StateFailed, reason, at
 	if !r.HoldReleased {
 		lease, err := c.Lease.Release(r.Amount, r.Quantity)
@@ -389,8 +452,15 @@ func Resolve(v varvigcli.Varvig, c Claim, happened bool, principal, detail strin
 }
 
 // Expired reports whether this reservation's hold has lapsed.
+//
+// It applies to an offered reservation as much as a taken one — more clearly, in
+// fact: nothing took the offer, so nothing happened, and holding lease headroom
+// for an action no executor ever picked up is exactly the budget leak §9.14 is
+// about. What it never does is release the *key*, in either state, because
+// distinguishing "nobody took it" from "somebody took it and went quiet" is the
+// state machine's job and not the expiry's.
 func (r Reservation) Expired(now int64) bool {
-	return r.ExpiresAt > 0 && now > r.ExpiresAt && !r.HoldReleased
+	return r.ExpiresAt > 0 && now > r.ExpiresAt && !r.HoldReleased && r.Open()
 }
 
 // ReleaseExpired returns the lease headroom held by expired reservations, so a
@@ -405,12 +475,12 @@ func (r Reservation) Expired(now int64) bool {
 // Returns the updated lease and the reservations whose holds were released, so
 // the caller can report them: each one is still an action of unknown outcome.
 func ReleaseExpired(v varvigcli.Varvig, lease authority.Lease, leaseHash string, now int64) (authority.Lease, string, []Reservation, error) {
-	pending, err := Pending(v, lease.CellID)
+	open, err := openReservations(v, lease.CellID)
 	if err != nil {
 		return lease, leaseHash, nil, err
 	}
 	var released []Reservation
-	for _, r := range pending {
+	for _, r := range open {
 		if r.Capability != lease.Capability || !r.Expired(now) {
 			continue
 		}
@@ -546,4 +616,77 @@ func short(h string) string {
 		return h
 	}
 	return h[:12] + "…"
+}
+
+// TakeSelf marks a reservation as held by the cell itself, for the in-process
+// path.
+//
+// The cell goes through the same take as a connector rather than skipping
+// straight to pending, so there is one answer to "who holds this" and one state
+// machine to reason about. An operator looking at a stuck reservation should not
+// have to know which path produced it.
+func TakeSelf(v varvigcli.Varvig, c Claim, at int64) (Claim, error) {
+	taken, err := Take(v, c.Reservation.CellID, c.Reservation.Key, c.Reservation.CellID, at, c.Reservation.TakeDeadline)
+	if err != nil {
+		return c, err
+	}
+	// Take is written for a connector, which never touches a lease and so gets
+	// none back. The cell does spend, so it carries its own lease across —
+	// without this the settlement that follows would operate on a zero lease.
+	taken.Lease, taken.LeaseHash = c.Lease, c.LeaseHash
+	return taken, nil
+}
+
+// openReservations lists a cell's reservations that still hold lease headroom —
+// offered, taken, or reported but not yet settled.
+//
+// Pending answers a narrower question (which outcomes are unknown) because that
+// is the one an operator escalates on. This one answers "what is still holding
+// money", which is what the expiry sweep needs.
+func openReservations(v varvigcli.Varvig, cellID string) ([]Reservation, error) {
+	if err := cell.CheckID(cellID); err != nil {
+		return nil, err
+	}
+	refs, err := v.Refs()
+	if err != nil {
+		return nil, err
+	}
+	prefix := cell.ReservationPrefix + cellID + "/"
+	var out []Reservation
+	var bad []string
+	for _, ref := range refs {
+		if !strings.HasPrefix(ref.Name, prefix) {
+			continue
+		}
+		r, _, err := loadReservation(v, ref.Name)
+		if err != nil {
+			bad = append(bad, fmt.Sprintf("%s: %v", ref.Name, err))
+			continue
+		}
+		if r.Open() {
+			out = append(out, r)
+		}
+	}
+	if len(bad) > 0 {
+		return out, fmt.Errorf("effect: %d unreadable reservation refs: %v", len(bad), bad)
+	}
+	return out, nil
+}
+
+// hasLease refuses a claim whose lease was not carried through.
+//
+// A zero lease is not a small mistake here: Release and Convert would compute
+// against an allocation of nothing and produce a double-release error naming a
+// cell called "/", which says nothing about what actually went wrong. This
+// turns a confusing arithmetic failure into the plumbing bug it is.
+func (c Claim) hasLease() error {
+	if c.Lease.CellID == "" {
+		return fmt.Errorf("effect: settling %s has no lease attached; the claim lost it between taking and settling",
+			short(c.Reservation.Key))
+	}
+	if c.Lease.CellID != c.Reservation.CellID {
+		return fmt.Errorf("effect: settling %s carries %s's lease, not %s's",
+			short(c.Reservation.Key), c.Lease.CellID, c.Reservation.CellID)
+	}
+	return nil
 }
