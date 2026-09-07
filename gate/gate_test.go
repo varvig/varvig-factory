@@ -145,7 +145,7 @@ func TestInputIsCanonicalAndCarriesTheDecisionContext(t *testing.T) {
 }
 
 func TestVerdictStrings(t *testing.T) {
-	if Promote.String() != "promote" || Refuse.String() != "refuse" || Defer.String() != "defer-to-human" {
+	if Promote.String() != "promote" || Refuse.String() != "refuse" || Defer.String() != "escalate" {
 		t.Fatal("verdict names are not stable; they appear in logs and refusals")
 	}
 }

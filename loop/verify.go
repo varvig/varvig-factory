@@ -250,6 +250,9 @@ func (c *Cell) promotionRequest(t claim.Ticket, att cell.Attempt) (promote.Reque
 		Ticket:       t.ID,
 		TicketObject: t.Object,
 		Ref:          c.branch(),
+		// What this pass established about the currency of trust state. Promotion
+		// requires it to be fresh (§4.3b); proposing does not.
+		Sync: c.sync,
 	}
 	if req.Ref == "" {
 		req.Ref = "refs/heads/main"

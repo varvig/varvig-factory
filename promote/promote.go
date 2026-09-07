@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/varvig/varvig-factory/agreement"
+	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/cell"
 	"github.com/varvig/varvig-factory/gate"
 	"github.com/varvig/varvig-factory/varvigcli"
@@ -29,7 +30,8 @@ const (
 	// promotable.
 	CondIndependentEvidence Condition = "independent-evidence"
 	// CondEnvironmentClass is §6.3.2: the environment class must match the
-	// declared baseline for that path. Cross-class comparison defers to a human.
+	// declared baseline for that path. Cross-class comparison escalates to a
+	// higher principal and never resolves itself.
 	CondEnvironmentClass Condition = "environment-class"
 	// CondReverified is §6.3.3: re-verification before promotion, not merely
 	// evidence replay.
@@ -48,6 +50,15 @@ const (
 	CondTrustGrant Condition = "trust-grant"
 	// CondGateVerdict is the wasm policy module's verdict (§6.2).
 	CondGateVerdict Condition = "gate-verdict"
+	// CondFreshTrustState is varvig-auth-and-api.md §4.3b: promotion moves a
+	// ref, so it requires current trust state.
+	//
+	// This is Factory's to enforce and not varvig's. varvig verifies a ref
+	// update's signer against the trust file *as the verifying peer holds it* —
+	// and a partitioned peer holds a stale file it has every reason to believe
+	// is current. Nothing inside varvig can tell the difference; the loop, which
+	// ran the sync, can.
+	CondFreshTrustState Condition = "fresh-trust-state"
 )
 
 // Reverifier runs the checks again, now, against the attempt.
@@ -82,6 +93,11 @@ type Request struct {
 	Ticket, TicketObject string
 	// Ref is the ref to promote onto. Empty means varvig's default (HEAD).
 	Ref string
+	// Sync is what the cell knows about the currency of its trust state
+	// (§4.3b). The zero value has Configured false, which means "no upstream,
+	// so nothing to be behind" — the right reading for a single-cell
+	// deployment, and the reason this field can be omitted safely.
+	Sync authority.Sync
 }
 
 // Outcome is what a promotion decision did and why.
@@ -112,10 +128,17 @@ type Failure struct {
 
 func (f Failure) String() string { return string(f.Condition) + ": " + f.Detail }
 
-// DeferredToHuman reports whether the outcome leaves the decision with a human.
-// That is the state of every gated run and of every autonomous run that did not
-// satisfy all conditions — the two are the same outcome and are reported as one.
-func (o Outcome) DeferredToHuman() bool { return !o.Promoted }
+// Escalated reports whether the outcome leaves the decision with a higher
+// principal. That is the state of every gated run and of every autonomous run
+// that did not satisfy all conditions — the two are the same outcome and are
+// reported as one.
+//
+// "Higher principal", not "human": §6 is explicit that humans are never a
+// required part of the loop. What matters is that authorization comes from a
+// *different and higher* principal than execution, and an overseer agent
+// satisfies that fully. Naming it "human" would quietly make a person mandatory
+// in a design that deliberately does not require one.
+func (o Outcome) Escalated() bool { return !o.Promoted }
 
 // Summary renders the outcome for a log line or a CLI.
 func (o Outcome) Summary() string {
@@ -124,7 +147,7 @@ func (o Outcome) Summary() string {
 	if o.Promoted {
 		fmt.Fprintf(&b, "promoted=%s", short(o.Change))
 	} else {
-		b.WriteString("promoted=no deferred-to-human")
+		b.WriteString("promoted=no escalated-to-higher-principal")
 	}
 	if o.GateRan {
 		fmt.Fprintf(&b, " gate=%s", o.Gate.Verdict)
@@ -151,6 +174,10 @@ type Promoter struct {
 	// silently passing it — a cell that does not know its own key cannot claim a
 	// grant.
 	Fingerprint string
+	// MaxTrustAge optionally bounds how old a successful sync may be and still
+	// count as current (§4.3b). Zero means reachability alone decides, which is
+	// exactly what the spec asks for; a stricter operator sets a value.
+	MaxTrustAge authority.MaxAge
 	// Now defaults to time.Now.
 	Now func() time.Time
 	// Log receives one line per decision. Optional, and separate from the
@@ -241,6 +268,13 @@ func (p *Promoter) Promote(ctx context.Context, req Request) (Outcome, error) {
 		out.Failed = append(out.Failed, Failure{CondTrustGrant, err.Error()})
 	}
 
+	// §4.3b: promotion requires fresh trust state. A cell that cannot confirm
+	// its view is current keeps proposing — append-only bounds that damage — and
+	// stops short of moving a ref.
+	if err := authority.Permit(authority.ActPromote, req.Sync, p.now(), p.MaxTrustAge, nil); err != nil {
+		out.Failed = append(out.Failed, Failure{CondFreshTrustState, err.Error()})
+	}
+
 	// The gate module. It runs in every mode — that is how a gated cell measures
 	// its policy before trusting it.
 	in := p.gateInput(req, mode, rate, independent)
@@ -285,7 +319,7 @@ func (p *Promoter) Promote(ctx context.Context, req Request) (Outcome, error) {
 	// around everything above: that is what keeps the autonomous path exercised.
 	if mode != ModeAutonomous {
 		out.Failed = append(out.Failed, Failure{Condition("mode"),
-			fmt.Sprintf("cell is running in %s mode; a human decides", mode)})
+			fmt.Sprintf("cell is running in %s mode; a higher principal decides — a human, or an overseer agent", mode)})
 	}
 
 	sortFailures(out.Failed)
@@ -469,8 +503,9 @@ var conditionOrder = map[Condition]int{
 	CondPathEnabled:         4,
 	CondAgreementMetric:     5,
 	CondTrustGrant:          6,
-	CondGateVerdict:         7,
-	Condition("mode"):       8,
+	CondFreshTrustState:     7,
+	CondGateVerdict:         8,
+	Condition("mode"):       9,
 }
 
 func sortFailures(f []Failure) {

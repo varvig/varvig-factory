@@ -1,7 +1,8 @@
 # The Cell Contract
 
-*Normative. Version 1.* Section references in the form §N.N refer to
-`FACTORY.md` (Design Notes VIII) unless another document is named.
+*Normative. Version 2* — adds authority (§8.1), effectful capabilities (§8.2),
+and the implementation status in §11. Section references in the form §N.N refer
+to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
 This is the interoperability surface of a Factory cell — the part that is
 expensive to retrofit once cells exist and have written state (§2). It is
@@ -12,9 +13,14 @@ Everything here is either an on-disk shape, a ref name, or a hash rule. Nothing
 here is a process, an RPC, or a schedule. A cell that honours this document
 federates; how it is implemented internally is its own business.
 
-**There is no central Factory.** Upstream is a varvig peer, nothing more — it
-runs no Factory process, holds no queue, and issues no RPCs (§1.1). Every
-obligation below is discharged by writing repository state.
+**There is no central Factory.** A peer is a varvig peer, nothing more — it runs
+no Factory process, holds no queue, and issues no RPCs (§1.1), and no member of a
+factory is designated as its coordinator (§3.0). Every obligation below is
+discharged by writing repository state.
+
+An **overseer** (§8.1) is the one asymmetry, and it is an asymmetry of *key
+scope*, not of topology: an overseer grants authority to spend, and sits nowhere
+in particular on the network.
 
 ---
 
@@ -25,8 +31,10 @@ A cell has a **cell id**: a short, stable, lowercase name matching
 is chosen once and never changed — renaming a cell orphans its claims and
 attempts.
 
-A cell has a **peer keypair** (varvig identity) and an `allowed_keys` entry in
-the repository trust store (`AUTH.md` §2), scoped by path and rights:
+A cell has a **peer keypair** (varvig identity) and an entry in the repository
+trust store — `.varvig.d/allowed_keys`, which is core's actual path; `.varvig/`
+is skipped by `write-tree` and is not where the trust store lives — scoped by
+path and rights:
 
 ```
 # fingerprint       name          scope              rights
@@ -57,6 +65,9 @@ identity is the one thing that cannot be done afterwards.
 | `refs/attempts/<cell-id>/<task-id>/<n>` | One immutable attempt, `n` counting from 1 |
 | `refs/claims/<cell-id>/<task-id>` | An advisory, TTL'd claim (§5) |
 | `refs/pins/<cell-id>/…` | Retention requests — varvig's own pin namespace (`FEDERATION.md` §4) |
+| `refs/envelopes/<overseer-id>` | The spend ceilings one overseer set, shared across its cells (§8.1) |
+| `refs/leases/<cell-id>/<capability>` | One exclusive allocation drawn from an envelope (§8.1) |
+| `refs/reservations/<cell-id>/<idempotency-key>` | An effectful action's reservation, keyed by its derived idempotency key (§8.2) |
 | note namespace `factory/evidence` | Evidence for an attempt (§4) |
 | note namespace `factory/environment` | The environment descriptor an evidence record was produced in (§4.2) |
 | note namespace `factory/artifact` | *Legacy.* `artifact-ref` records, for a core without `tickets attach-artifact` (§7) |
@@ -377,6 +388,197 @@ budget on work that proves duplicative (§7).
   cell drops its own retention obligations deliberately rather than collecting
   state another cell is still evaluating.
 
+§8 bounds compute, which is regenerable: exceeding it wastes money and nothing
+else. The two subsections below bound spend that cannot be regenerated, and they
+are a different mechanism for that reason.
+
+### 8.1 Authority: envelopes and leases
+
+An overseer grants a cell authority to spend in two shapes, and the difference
+between them is the whole design:
+
+| | Envelope | Lease |
+|---|---|---|
+| What it is | A **shared ceiling** across every cell under one overseer | An **exclusive allocation** to one cell |
+| Ref | `refs/envelopes/<overseer-id>` | `refs/leases/<cell-id>/<capability>` |
+| Enforceable from a stale view? | No — another cell may have spent it | Yes — nobody else can spend it |
+| Spendable offline | No | Yes, indefinitely |
+
+The capability is hex-encoded in a lease ref, because a capability alias
+contains `@` and a ref path component should not carry an alias's punctuation.
+
+```json
+{ "overseer": "overseer-a", "set_at": 1755820800,
+  "ceilings": [
+    { "capability": "pcb-fabrication@1", "spend": 5000, "unit": "EUR",
+      "quantity": 100, "rate_per_day": 4 },
+    { "capability": "human-contract@1",  "spend": 2000, "unit": "EUR" }
+  ] }
+```
+
+```json
+{ "cell_id": "mini-a", "capability": "pcb-fabrication@1",
+  "overseer": "overseer-a", "envelope": "<envelope object hash>",
+  "amount": 1000, "unit": "EUR", "quantity": 20,
+  "spent": 320, "ordered": 5,
+  "reserved": 400, "reserved_units": 6,
+  "issued_at": 1755820800, "reclaim_after": 1755907200 }
+```
+
+Four rules:
+
+- **An envelope with no ceilings is malformed, not unlimited**, and a capability
+  the envelope does not list has no ceiling to be under. Silence is not
+  permission.
+- **Leases never overlap and never sum past their ceiling.** One cell holds at
+  most one lease per capability; the sum of outstanding leases for a capability
+  is bounded by the envelope's ceiling for it. The overseer's maximum exposure is
+  therefore the sum of outstanding lease *headroom*, which is the number to
+  reason about — not the envelope, which is only what could be allocated.
+- **Headroom is the allocation less what is spent and less what is held.**
+  `reserved` and `reserved_units` are held by reservations that have not settled
+  (§8.2). Held is not spent — a hold can come back and a spend cannot — but it is
+  equally unavailable, because a pending reservation may already be a real order
+  at the far end.
+- **A lease is spendable from a stale view, indefinitely.** The amount was
+  committed when the lease was issued, so no connectivity is in the spend path.
+  This is the autonomy that matters: a disconnected cell keeps working.
+- **Beyond the lease escalates; it never falls back to the envelope.** A lease
+  that can be exceeded by drawing on the shared ceiling is advisory, and an
+  advisory exclusive allocation is a shared one.
+
+`reclaim_after` is a **signal to the overseer, not an expiry**. It does not stop
+the holder spending. A lease with any recorded spend is never reclaimed, because
+the cell may have placed an order it has not yet reported, and reclaiming there
+is exactly how a double-spend happens.
+
+The same split decides what a cell may do while its view of trust state is stale
+(`varvig-auth-and-api.md` §4.3b) — grouped by reversibility, not by whether it
+is a write:
+
+| Act | Stale view |
+|---|---|
+| Propose | Allowed. Append-only bounds the damage: a revoked principal that has not heard yet wastes compute. |
+| Promote | **Refused.** It moves a ref, and a shared ceiling cannot be enforced locally. |
+| Effectful | Allowed **within an outstanding lease**, offline, indefinitely. Refused with no lease. |
+
+Freshness is Factory's to enforce, not varvig's, and not by choice: varvig's
+ref-update verification checks a signer against the trust file *as the verifying
+peer holds it*, and a partitioned peer holds a stale file it has every reason to
+believe is current. Nothing inside varvig can tell the difference. The loop,
+which ran the sync, can.
+
+There is no age threshold by default. A successful sync establishes current
+state; inventing a staleness clock on top of that would be inventing policy. An
+operator who wants one — for a sync loop that has stalled without failing —
+configures it.
+
+### 8.2 Effectful capabilities
+
+An effectful capability has real-world side effects that cannot be re-run,
+discarded, or regenerated: ordering fabrication, contracting a human, shipping,
+moving money. Every other assumption in Factory inverts here. Speculation is
+search, so attempts are normally cheap and duplicates across a partition are the
+point. `--attempts 3` on a board order means three orders and three invoices.
+
+The hazard is that an effectful capability looks exactly like an ordinary one
+until the invoice arrives, so the marking is explicit and the rules are
+refusals:
+
+1. **`attempts` is 1, by rejection and not by clamping.** A clamp would execute
+   something other than what was asked for, on the one class of action where
+   that means a wrong order rather than a wasted GPU-hour. The task is wrong and
+   its author is told.
+2. **An idempotency key is mandatory**, in both promotion modes. It is *derived*
+   from `(task-id, capability alias, interface hash, canonical payload)`, each
+   component length-prefixed, so a retry after a mid-flight network failure
+   computes the same key from the same intent without having to remember one.
+   The key is a function of what the action is, so "the same action" and "the
+   same key" cannot drift apart.
+3. **A higher principal authorizes, and a cell never authorizes its own
+   effectful action** — not even holding a factory key with `promote`. Promote
+   rights move refs; they are not a licence to spend money, and conflating the
+   two turns a scoped repository credential into a purchasing credential. The
+   higher principal need not be human: an overseer agent satisfies this fully.
+4. **Bounded by the envelope, spent from the acting cell's own lease.** Another
+   cell's lease is not spendable here, however much headroom it has.
+5. **Never auto-retried, never regenerated.** A failed effectful action
+   escalates; retry is an authorized decision, not a loop behaviour. A
+   conflicting effectful attempt does not re-run, because the external world has
+   already moved.
+
+#### The reservation is what actually stops the second order
+
+Deriving a stable key says what "the same action" means. It does not by itself
+stop the action happening twice — for that, the key has to be claimed somewhere
+that survives the process, **before** the effect is attempted. That place is
+`refs/reservations/<cell-id>/<idempotency-key>`, and the claim is create-only:
+whoever creates the ref executes, and everyone else finds it already there. That
+is varvig's ordinary ref CAS doing the work; nothing here needs a lock.
+
+The order is deliberately the pessimistic one — reserve, execute, settle:
+
+| State | Meaning | Who may clear it |
+|---|---|---|
+| `pending` | reserved, and **possibly executed** — the cell does not know which | a higher principal, after checking the external system |
+| `done` | the effect is confirmed to have happened; carries the far end's own reference | — |
+| `failed` | the external service is confirmed to have **rejected** it, so no effect occurred | — |
+
+A reservation also **holds lease headroom** for as long as it is outstanding
+(§7.1). Without that, two pending actions would each check the same headroom,
+each pass, and together exceed the lease — the first order's money still looks
+available right up until its invoice arrives. So headroom has three states, not
+two: allocated, **held**, and spent. Only settlement turns a hold into spend,
+and it settles the price actually charged rather than the one quoted; a
+divergence is recorded rather than absorbed, because one is noise and a pattern
+of them is a capability whose quotes cannot be trusted.
+
+The hold is taken **before** the key is claimed. If the claim then fails the
+hold is released, and if that release fails the headroom leaks until it expires.
+That order is chosen deliberately: leaking headroom is recoverable and a
+double-spend is not, so the two writes fail in the recoverable direction.
+
+A crash between reserve and settle leaves `pending`, which is the honest record
+of the one state that matters. Three rules follow, and each of them forbids
+something that would otherwise look like a reasonable clean-up:
+
+- **A timeout is not a failure.** "We never heard back" and "it did not happen"
+  are different claims and only one is safe to act on, so only a definite
+  rejection may be recorded as `failed`.
+- **A pending reservation is never retried and never deleted.** Deleting it to
+  clear the way is precisely how the second invoice arrives.
+- **A cell cannot resolve its own pending reservation.** Resolving it means
+  checking the far end and asserting what is true there, which is the same class
+  of act as authorizing the spend in the first place.
+
+A settled reservation must carry the external system's own identifier. The next
+question about an unexpected invoice is "which order was it", and the answer has
+to be in the record.
+
+**Expiry releases the hold, never the key.** A lost external response must not
+consume budget for good, so the held headroom comes back on a timer. It must
+also not let the same action be submitted again, because it may well have
+happened — so the key stays claimed permanently. Two different resources,
+released on two different rules: money on a timer, the right to act not at all.
+A reservation whose hold has lapsed is still `pending`, still reported, and
+still waiting on a principal; if that principal finds the order was real, the
+spend is applied to the lease with no hold left to convert.
+
+A capability reference names the **interface hash**, not only the alias. Two
+factories may hold the same alias without agreeing who owns the name, so
+matching is on the hash: an alias match with a hash mismatch is precisely the
+collision the binding exists to catch. The hash is in the idempotency key too,
+so re-pointing an alias cannot make a new action look like an old one.
+
+A capability whose price is only known by asking an external service **requires
+connectivity by its nature, not by policy**. There is no rule here forbidding a
+quoted action offline — only the observation, surfaced in the refusal, that it
+cannot happen.
+
+Every unmet rule is reported at once. Elsewhere an early exit saves an expensive
+re-verification; nothing here is expensive, and an operator about to spend money
+should see the whole list rather than one round trip per broken rule.
+
 ---
 
 ## 9. Promotion agreement
@@ -417,6 +619,56 @@ rationale.
 5. **No self-verified autonomous promotion** (§6.3 condition 1).
 6. **No cross-class comparison treated as equality** (§4.4).
 7. **No registry credentials handed to varvig** (§7).
-8. **No tier-specific code path.** Micro and Mini differ only in which model
-   runtime and budget the configuration names (§1.2). A branch on tier in the
-   code means the abstraction has failed.
+8. **No class-specific code path.** Micro, Mini and Medium are cell *classes*
+   describing capacity, and they differ only in which model runtime and budget
+   the configuration names (§1.2). A branch on the class name in the code means
+   the abstraction has failed. (The design notes called these tiers; the word
+   changed because a tier implies a rank, and there is none — see §11.)
+9. **No self-authorized effectful action** (§8.2 rule 3), whatever rights the
+   cell's own key carries.
+10. **No speculation on an effectful capability**, and no silent clamp to one
+    attempt instead (§8.2 rule 1).
+11. **No promotion from a stale view of trust state** (§8.1). A cell that cannot
+    confirm trust state is current keeps proposing and stops promoting.
+12. **No borrowing against the envelope** when a lease runs out (§8.1). The cell
+    stops and says so; a higher principal decides whether to raise the lease.
+13. **No clearing a pending reservation to get unstuck** (§8.2). Not by retrying,
+    not by deleting it, and not by the cell resolving its own unknown state.
+
+---
+
+## 11. What this contract does not yet cover
+
+The design notes moved ahead of this implementation in four places. They are
+listed here rather than left to be discovered, because a contract that quietly
+omits a rule reads exactly like one that has decided against it.
+
+**Cell classes, not tiers, and factories are flat.** Micro, Mini and Medium
+describe *capacity*; a factory is one or more cooperating cells with no
+hierarchy. The terminology is corrected throughout this document and the
+implementation has no branch on the class name — but one behavioural gap
+remains: **there is no designated upstream peer** in the design, and any member
+may act as a rendezvous, several at once. The loop still takes a single
+`upstream` address. That is enough for a cell to sync and it is not a
+coordinator — nothing reads from it that a peer could not serve — but it is not
+yet the "any member, several at once" the design asks for, and a factory should
+keep working when any particular member is unreachable.
+
+**Interfaces are not yet varvig objects.** A capability reference already binds
+to the interface *hash* rather than the alias (§8.2), which is the part that
+matters for safety. What is missing is the registry the hash points into:
+interfaces published as objects, resolvable by hash, with the alias as a
+convenience over the top.
+
+**Reputation is not derived.** Capability claims are advisory, and the design
+derives a cell's standing from its promotion history rather than from what it
+declares about itself. Today only the agreement-rate metric (§9) is derived, and
+it is per scope rather than per cell.
+
+**Envelope tightening is not implemented.** An overseer who narrows an envelope
+mid-run should have the tighter ceiling honoured before the next effectful
+action, while a *loosening* should not apply until the cell has synced — the
+asymmetry being that a tighter ceiling is safe to adopt from any view and a
+looser one is not. Today a cell checks its lease, which an envelope change does
+not touch, so tightening the envelope does not reach a lease already issued;
+reducing exposure means reclaiming or reissuing leases.

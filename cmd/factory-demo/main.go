@@ -29,8 +29,10 @@ import (
 
 	"github.com/varvig/varvig-factory/agreement"
 	"github.com/varvig/varvig-factory/artifact"
+	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/budget"
 	"github.com/varvig/varvig-factory/cell"
+	"github.com/varvig/varvig-factory/effect"
 	"github.com/varvig/varvig-factory/gate"
 	"github.com/varvig/varvig-factory/inference"
 	"github.com/varvig/varvig-factory/loop"
@@ -134,7 +136,7 @@ func run() error {
 		return err
 	}
 	fmt.Println(indent(out.Summary()))
-	fmt.Println("  the cell evaluated every condition and promoted nothing; a human decides")
+	fmt.Println("  the cell evaluated every condition and promoted nothing; a higher principal decides")
 
 	// A human promotes, and the cell records whether scoring agreed. That
 	// observation is the only honest basis for enabling autonomy later (§6.4).
@@ -285,6 +287,132 @@ func run() error {
 	fmt.Println(indent(out.Summary()))
 	fmt.Println("  still in autonomous mode, and promoting nothing: the revocation alone stopped it")
 
+	section("phase 5: authority — a lease is spendable offline; a promotion is not (§4.3b, §6.7)")
+
+	// Back to a promotable state: the trust line restored, autonomous mode on.
+	mini.v.SetTrust(varvigcli.TrustEntry{
+		Fingerprint: mini.fingerprint, Name: "factory-prod", Scope: "src/", Rights: []string{"promote"},
+	})
+
+	// The partition. Same request, same rights, same gate — the only thing that
+	// changed is that the cell can no longer confirm its trust state is current.
+	// Promotion moves a ref that everyone else builds on, and a shared ceiling
+	// cannot be enforced from a stale view, so it refuses.
+	disconnected := freshReq
+	disconnected.Sync = authority.Sync{Configured: true, Reachable: false, At: clock.Add(-72 * time.Hour)}
+	fmt.Println("  --- upstream unreachable for three days ---")
+	out, err = mini.cell.Promoter.Promote(ctx, disconnected)
+	if err != nil {
+		return err
+	}
+	fmt.Println(indent(out.Summary()))
+
+	// Meanwhile the cell keeps proposing. Append-only bounds the damage: a
+	// principal revoked in the partition wastes compute and nothing more.
+	must(authority.Permit(authority.ActPropose, disconnected.Sync, clock, 0, nil))
+	fmt.Println("  proposing is still permitted while disconnected")
+
+	// And it keeps spending what was *exclusively* allocated to it. The overseer
+	// committed this 1000 EUR to mini-a when the lease was issued, so no other
+	// cell can spend it and no connectivity is needed to know that.
+	envelope := authority.Envelope{
+		Overseer: "overseer-a", SetAt: clock.Unix(),
+		Ceilings: []authority.Ceiling{{
+			Capability: "pcb-fabrication@1", Spend: 5000, Unit: "EUR", Quantity: 100, RatePerDay: 4,
+		}},
+	}
+	must(envelope.Validate())
+	lease := authority.Lease{
+		CellID: "mini-a", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
+		Envelope: "1e20" + short(third.Change), Amount: 1000, Unit: "EUR", Quantity: 20,
+		IssuedAt: clock.Unix(), ReclaimAfter: clock.Add(24 * time.Hour).Unix(),
+	}
+	must(authority.CheckExclusive(envelope, []authority.Lease{lease}))
+
+	// Both live in the repository, under their own ref prefixes, signed and
+	// CAS-updated like anything else. Nothing about this asks varvig to change.
+	must1(authority.PublishEnvelope(mini.v, envelope, ""))
+	must1(authority.PublishLease(mini.v, lease, ""))
+	fmt.Printf("  %s -> %s\n", must1(cell.EnvelopeRef(envelope.Overseer)),
+		short(must1(mini.v.ResolveRef(must1(cell.EnvelopeRef(envelope.Overseer))))))
+	issued, _ := must2(authority.LoadLease(mini.v, "mini-a", "pcb-fabrication@1"))
+	fmt.Printf("  %s\n", issued)
+
+	boards := effect.Capability{
+		ID:        "pcb-fabrication@1",
+		Interface: ifaceHash(map[string]any{"gerber": "string", "quantity": "integer"}),
+		Effectful: true,
+		CostModel: effect.CostFixed,
+	}
+	order := effect.Request{
+		Capability: boards, Task: ticket, Attempts: 1,
+		Payload: map[string]any{"gerber": short(third.Change), "quantity": 5},
+		Amount:  320, Quantity: 5, Unit: "EUR",
+		AuthorizedBy: "overseer-a",
+	}
+	dec := effect.Check(order, "mini-a", &lease, disconnected.Sync, func() time.Time { return clock }, 0)
+	fmt.Printf("  offline order of 320 EUR inside a 1000 EUR lease: allowed=%v key=%s…\n", dec.Allowed, dec.Key[:12])
+
+	// The same intent, retried after the response was lost. Note the payload is
+	// handed back with its keys in the other order: the key is a function of what
+	// the action *is*, so this is one order, not two.
+	retry := order
+	retry.Payload = map[string]any{"quantity": 5, "gerber": short(third.Change)}
+	again := effect.Check(retry, "mini-a", &lease, disconnected.Sync, func() time.Time { return clock }, 0)
+	fmt.Printf("  the retry after a lost response derives the same key: %v\n", again.Key == dec.Key)
+
+	// Reserve, execute, settle. The key is claimed in a ref before the effect is
+	// attempted, create-only — and the same write holds the lease headroom, so a
+	// second pending order cannot pass the same headroom check.
+	current, readAt := must2(authority.LoadLease(mini.v, "mini-a", "pcb-fabrication@1"))
+	claim := must1(effect.Reserve(mini.v, order, "mini-a", current, readAt, clock.Unix(), 3600))
+	fmt.Printf("  reserved: %s\n", claim.Reservation)
+	fmt.Printf("  the lease now holds %g EUR against it, leaving %g of %g\n",
+		claim.Lease.Reserved, claim.Lease.Headroom(), claim.Lease.Amount)
+
+	// A second order that fits the allocation but not the remaining headroom is
+	// refused while the first is still outstanding. Counting only settled spend
+	// would wave it through and the two together would exceed the lease.
+	competing := order
+	competing.Task, competing.Amount = ticket+"-b", 800
+	_, tooMuch := effect.Reserve(mini.v, competing, "mini-a", claim.Lease, claim.LeaseHash, clock.Unix()+1, 3600)
+	fmt.Printf("  a second 800 EUR order while the first is pending: %v\n", tooMuch != nil)
+
+	// The order goes through, and settlement converts the hold into spend at the
+	// price actually charged rather than the one quoted.
+	claim = must1(effect.Settle(mini.v, claim, "PO-90210", 355.40, clock.Add(time.Minute).Unix()))
+	fmt.Printf("  settled: %g EUR spent of %g, %g left (%s)\n",
+		claim.Lease.Spent, claim.Lease.Amount, claim.Lease.Headroom(), claim.Reservation.Detail)
+
+	// The same action again is refused by varvig's ordinary ref CAS, and told
+	// what happened rather than placing a second order.
+	_, repeat := effect.Reserve(mini.v, retry, "mini-a", claim.Lease, claim.LeaseHash, clock.Add(time.Hour).Unix(), 3600)
+	fmt.Printf("  the same action reserved again: %v\n", repeat)
+
+	// Exposure is what the overseer reasons about, and it is the sum of lease
+	// *headroom*: what is spent is gone, and what is held may already be an order
+	// at the far end. Neither is still allocatable.
+	fmt.Printf("  outstanding exposure for pcb-fabrication@1: %g EUR\n",
+		authority.Exposure(must1(authority.Leases(mini.v, "")))["pcb-fabrication@1"])
+	lease = claim.Lease
+
+	// Beyond the lease escalates rather than drawing on the 5000 EUR envelope.
+	// A lease that can be exceeded is advisory, and an advisory exclusive
+	// allocation is a shared one.
+	tooBig := order
+	tooBig.Amount, tooBig.Quantity = 900, 12
+	beyond := effect.Check(tooBig, "mini-a", &lease, disconnected.Sync, func() time.Time { return clock }, 0)
+	fmt.Printf("  a 900 EUR order with %g EUR left: allowed=%v escalate=%v\n", lease.Headroom(), beyond.Allowed, beyond.Escalate)
+	fmt.Println(indent(beyond.Error()))
+
+	// And the cell cannot authorize its own order, holding a promote key or not.
+	// Promote rights move refs; they are not a licence to spend money.
+	itself := order
+	itself.AuthorizedBy = "mini-a"
+	self := effect.Check(itself, "mini-a", &lease, disconnected.Sync, func() time.Time { return clock }, 0)
+	fmt.Printf("  mini-a authorizing its own order, promote key in hand: allowed=%v escalate=%v\n", self.Allowed, self.Escalate)
+	fmt.Println(indent(self.Error()))
+
 	section("done")
 	fmt.Println("Every step above was a write to repository state. No cell ever told another")
 	fmt.Println("cell what to do, and no process held a queue.")
@@ -428,6 +556,30 @@ func (d *demoCell) request(att loop.AttemptResult) promote.Request {
 		}
 	}
 	return req
+}
+
+// must2 is must for a call returning two values and an error.
+func must2[A, B any](a A, b B, err error) (A, B) {
+	must(err)
+	return a, b
+}
+
+// must1 is must for a call that also returns a value.
+func must1[T any](v T, err error) T {
+	must(err)
+	return v
+}
+
+// ifaceHash stands in for a capability registry: hash the interface schema and
+// encode it as an object hash. A capability reference binds to this, not to the
+// alias, so two factories using the same alias for different interfaces cannot
+// be mistaken for each other.
+func ifaceHash(schema any) string {
+	labelled, err := cell.CanonicalHash(schema)
+	must(err)
+	mh, err := cell.ToMultihash(labelled)
+	must(err)
+	return mh
 }
 
 func seedTicket(v *varvigcli.Fake) {
