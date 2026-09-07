@@ -163,8 +163,8 @@ func PermitSpend(s Sync, now time.Time, maxAge MaxAge, lease *Lease, amount floa
 	}
 	if amount > 0 && lease.Amount > 0 && amount > lease.Headroom() {
 		return Refusal{Act: ActEffectful, Escalate: true, Reason: fmt.Sprintf(
-			"this action costs %g %s but the lease for %s has %g %s left; beyond the lease escalates rather than drawing on the envelope",
-			amount, lease.Unit, lease.Capability, lease.Headroom(), lease.Unit)}
+			"this action costs %s %s but the lease for %s has %s %s left; beyond the lease escalates rather than drawing on the envelope",
+			money(amount), lease.Unit, lease.Capability, money(lease.Headroom()), lease.Unit)}
 	}
 	if quantity > 0 {
 		if headroom := lease.QuantityHeadroom(); headroom >= 0 && quantity > headroom {

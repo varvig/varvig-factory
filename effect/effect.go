@@ -190,15 +190,28 @@ func (d Decision) Error() string {
 
 // Check applies every §6.7 rule to a request.
 //
-// executingCell is the cell about to act; lease is its lease for this
-// capability; sync is what it knows about the currency of trust state.
+// executingCell is the cell about to act; grant is the envelope and lease it
+// acts under; sync is what it knows about the currency of trust state.
+//
+// The spend rules are evaluated against the **envelope-bounded** lease, not the
+// lease as issued, so an overseer who tightened the envelope has the tighter
+// ceiling honoured here before anything happens (§9.12).
 //
 // The order is cheapest-and-most-decisive first, but every rule is evaluated:
 // unlike the promotion path, where an early exit saves an expensive
 // re-verification, nothing here is expensive and an operator about to spend
 // money should see the full list.
-func Check(req Request, executingCell string, lease *authority.Lease, sync authority.Sync, now nowFunc, maxAge authority.MaxAge) Decision {
+func Check(req Request, executingCell string, grant authority.Grant, sync authority.Sync, now nowFunc, maxAge authority.MaxAge) Decision {
 	var d Decision
+
+	// Rule 4: bounded by the envelope. This resolves before the rest because
+	// every spend rule below is checked against its result — a lease read
+	// without its envelope is a lease nobody has bounded.
+	lease, boundErr := grant.Bounded()
+	if boundErr != nil {
+		d.Escalate = true
+		d.Refusals = append(d.Refusals, boundErr.Error())
+	}
 
 	if err := req.Capability.Validate(); err != nil {
 		d.Refusals = append(d.Refusals, err.Error())
@@ -237,11 +250,14 @@ func Check(req Request, executingCell string, lease *authority.Lease, sync autho
 		d.Refusals = append(d.Refusals, fmt.Sprintf("%v: %s cannot authorize itself", ErrSelfAuthorization, executingCell))
 	}
 
-	// Rules 4 and 5: bounded by the envelope, spent from this cell's own lease.
-	// Note the asymmetry that §6.6 insists on — the lease check needs no
-	// freshness, because an exclusive allocation was already committed when it
-	// was issued.
-	if lease != nil && lease.CellID != "" && lease.CellID != executingCell {
+	// Rule 5: spent from this cell's own lease. Note the asymmetry that §6.6
+	// insists on — the lease check needs no freshness, because an exclusive
+	// allocation was already committed when it was issued, and the envelope
+	// bound above is safe to apply from any view because it only tightens.
+	if boundErr != nil {
+		// Already refused above, and without a bounded lease there is no
+		// headroom to check against.
+	} else if lease != nil && lease.CellID != "" && lease.CellID != executingCell {
 		d.Refusals = append(d.Refusals, fmt.Sprintf(
 			"the lease for %s belongs to %s, not to %s; spend comes from the acting cell's own lease",
 			req.Capability.ID, lease.CellID, executingCell))

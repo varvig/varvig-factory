@@ -37,7 +37,9 @@ package authority
 
 import (
 	"fmt"
+	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -104,7 +106,7 @@ func (e Envelope) Validate() error {
 			return fmt.Errorf("authority: envelope for %s has a negative ceiling on %q", e.Overseer, c.Capability)
 		}
 		if c.Spend > 0 && c.Unit == "" {
-			return fmt.Errorf("authority: ceiling on %q names a spend of %g with no unit", c.Capability, c.Spend)
+			return fmt.Errorf("authority: ceiling on %q names a spend of %s with no unit", c.Capability, money(c.Spend))
 		}
 	}
 	return nil
@@ -180,12 +182,12 @@ func (l Lease) Validate() error {
 		return fmt.Errorf("authority: lease for %s/%s has a negative amount", l.CellID, l.Capability)
 	}
 	if l.Amount > 0 && l.Unit == "" {
-		return fmt.Errorf("authority: lease for %s/%s allocates %g with no unit", l.CellID, l.Capability, l.Amount)
+		return fmt.Errorf("authority: lease for %s/%s allocates %s with no unit", l.CellID, l.Capability, money(l.Amount))
 	}
 	if l.Spent > l.Amount {
 		// Overspend is not a state to tolerate quietly: it means either a
 		// settlement bug or an action taken outside the lease.
-		return fmt.Errorf("authority: lease for %s/%s has spent %g of %g", l.CellID, l.Capability, l.Spent, l.Amount)
+		return fmt.Errorf("authority: lease for %s/%s has spent %s of %s", l.CellID, l.Capability, money(l.Spent), money(l.Amount))
 	}
 	if l.Ordered > l.Quantity && l.Quantity > 0 {
 		return fmt.Errorf("authority: lease for %s/%s has ordered %d of %d", l.CellID, l.Capability, l.Ordered, l.Quantity)
@@ -194,8 +196,8 @@ func (l Lease) Validate() error {
 		// Over-commitment: settled spend plus held headroom exceeds the lease.
 		// It means a hold was taken without checking, or a settlement recorded
 		// an actual larger than its hold without the hold being adjusted.
-		return fmt.Errorf("authority: lease for %s/%s has committed %g of %g (%g spent, %g held by reservations)",
-			l.CellID, l.Capability, l.Spent+l.Reserved, l.Amount, l.Spent, l.Reserved)
+		return fmt.Errorf("authority: lease for %s/%s has committed %s of %s (%s spent, %s held by reservations)",
+			l.CellID, l.Capability, money(l.Spent+l.Reserved), money(l.Amount), money(l.Spent), money(l.Reserved))
 	}
 	if l.Quantity > 0 && l.Ordered+l.ReservedUnits > l.Quantity {
 		return fmt.Errorf("authority: lease for %s/%s has committed %d of %d units (%d ordered, %d held)",
@@ -306,8 +308,8 @@ func CheckExclusive(env Envelope, leases []Lease) error {
 			}
 		}
 		if ceiling.Spend > 0 && totalSpend > ceiling.Spend {
-			return fmt.Errorf("authority: outstanding leases for %q total %g %s against a ceiling of %g %s; the owner's exposure would exceed what they set",
-				capability, totalSpend, ceiling.Unit, ceiling.Spend, ceiling.Unit)
+			return fmt.Errorf("authority: outstanding leases for %q total %s %s against a ceiling of %s %s; the owner's exposure would exceed what they set",
+				capability, money(totalSpend), ceiling.Unit, money(ceiling.Spend), ceiling.Unit)
 		}
 		if ceiling.Quantity > 0 && totalQuantity > ceiling.Quantity {
 			return fmt.Errorf("authority: outstanding leases for %q total %d units against a ceiling of %d",
@@ -334,7 +336,7 @@ func Exposure(leases []Lease) map[string]float64 {
 // String renders a lease for an operator.
 func (l Lease) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s/%s: %g of %g %s", l.CellID, l.Capability, l.Spent, l.Amount, l.Unit)
+	fmt.Fprintf(&b, "%s/%s: %s of %s %s", l.CellID, l.Capability, money(l.Spent), money(l.Amount), l.Unit)
 	if l.Quantity > 0 {
 		fmt.Fprintf(&b, ", %d of %d units", l.Ordered, l.Quantity)
 	}
@@ -355,8 +357,8 @@ func (l Lease) Hold(amount float64, quantity int64) (Lease, error) {
 		return l, fmt.Errorf("authority: cannot hold a negative amount on %s/%s", l.CellID, l.Capability)
 	}
 	if amount > 0 && amount > l.Headroom() {
-		return l, fmt.Errorf("authority: holding %g %s on the lease for %s/%s leaves %g; only %g is available",
-			amount, l.Unit, l.CellID, l.Capability, l.Headroom()-amount, l.Headroom())
+		return l, fmt.Errorf("authority: holding %s %s on the lease for %s/%s leaves %s; only %s is available",
+			money(amount), l.Unit, l.CellID, l.Capability, money(l.Headroom()-amount), money(l.Headroom()))
 	}
 	if quantity > 0 {
 		if headroom := l.QuantityHeadroom(); headroom >= 0 && quantity > headroom {
@@ -380,8 +382,8 @@ func (l Lease) Release(amount float64, quantity int64) (Lease, error) {
 		return l, fmt.Errorf("authority: cannot release a negative amount on %s/%s", l.CellID, l.Capability)
 	}
 	if amount > l.Reserved || quantity > l.ReservedUnits {
-		return l, fmt.Errorf("authority: releasing %g %s and %d units on %s/%s, which holds only %g and %d; this is a double release",
-			amount, l.Unit, quantity, l.CellID, l.Capability, l.Reserved, l.ReservedUnits)
+		return l, fmt.Errorf("authority: releasing %s %s and %d units on %s/%s, which holds only %s and %d; this is a double release",
+			money(amount), l.Unit, quantity, l.CellID, l.Capability, money(l.Reserved), l.ReservedUnits)
 	}
 	l.Reserved -= amount
 	l.ReservedUnits -= quantity
@@ -407,7 +409,140 @@ func (l Lease) Convert(held, actual float64, heldUnits, actualUnits int64) (Leas
 	released.Spent += actual
 	released.Ordered += actualUnits
 	if err := released.Validate(); err != nil {
-		return l, fmt.Errorf("settling %g %s against a hold of %g: %w", actual, l.Unit, held, err)
+		return l, fmt.Errorf("settling %s %s against a hold of %s: %w", money(actual), l.Unit, money(held), err)
 	}
 	return released, nil
+}
+
+// Constrain returns this lease as the envelope currently bounds it: a copy whose
+// allocation is capped at the envelope's ceiling for the capability.
+//
+// This is FACTORY.md §9.12 — an overseer tightens an envelope mid-run and the
+// cell honours the tighter ceiling before its next effectful action. The
+// mechanism is a minimum, and the asymmetry the spec asks for falls out of it
+// for free:
+//
+//   - **Tightening bites immediately, from any view.** A ceiling below the lease
+//     lowers the effective allocation. Adopting a tighter ceiling can only ever
+//     reduce spend, so it is safe to act on whether or not the cell has synced
+//     recently — being wrong means spending less than authorized, which nobody
+//     has to undo.
+//   - **Loosening does not apply at all.** A ceiling above the lease leaves the
+//     minimum at the lease, so a wider envelope grants this cell nothing. More
+//     headroom requires a *new lease*, which only the overseer can write and
+//     which the cell therefore cannot see without syncing.
+//
+// That is why there is no freshness check here, and it matters: §4.3b's whole
+// point is that effectful action inside a lease needs no connectivity, and a
+// staleness test in this path would take that back.
+//
+// # What this does and does not guarantee
+//
+// The envelope ceiling is *shared*. If three cells hold leases under one
+// overseer, each capping itself at the shared ceiling still permits their sum to
+// exceed it — which is exactly why §6.6 says a shared ceiling cannot be enforced
+// locally. So this is a floor of safety, not the enforcement mechanism.
+// Tightening is enforced by the overseer **not replenishing**: it cannot claw
+// back an unspent lease without reaching the cell, and that is acceptable rather
+// than a hole, because exposure was already bounded by the lease amount when it
+// was issued.
+//
+// The returned lease is a **view for deciding, never a value to store.** Writing
+// it back would rewrite the record of what was actually allocated, destroying
+// the evidence of what the overseer committed to and when.
+func (l Lease) Constrain(env Envelope) (Lease, error) {
+	if l.Overseer != env.Overseer {
+		return l, fmt.Errorf("authority: the lease for %s/%s was issued by %q, but this envelope is %q's; a lease is bounded by its own overseer's envelope",
+			l.CellID, l.Capability, l.Overseer, env.Overseer)
+	}
+	ceiling, ok := env.Ceiling(l.Capability)
+	if !ok {
+		// The capability was removed from the envelope, which is tightening in
+		// its sharpest form. Silence is not permission (§8.1), so this refuses
+		// rather than treating the missing ceiling as unbounded or as zero-with-
+		// a-shrug.
+		return l, fmt.Errorf("authority: the envelope no longer bounds %q, so the lease for %s has no ceiling to be under; a higher principal decides whether to restore it",
+			l.Capability, l.CellID)
+	}
+	if ceiling.Unit != "" && l.Unit != "" && ceiling.Unit != l.Unit {
+		return l, fmt.Errorf("authority: the lease for %s/%s is in %q but its ceiling is in %q; comparing them would be arithmetic on unlike units",
+			l.CellID, l.Capability, l.Unit, ceiling.Unit)
+	}
+
+	if ceiling.Spend > 0 && ceiling.Spend < l.Amount {
+		// Never below what is already spent. A ceiling under the spend does not
+		// claw money back — that money is gone — it means nothing further is
+		// spendable, which is what a zero headroom says.
+		l.Amount = max(ceiling.Spend, l.Spent+l.Reserved)
+	}
+	if ceiling.Quantity > 0 && (l.Quantity <= 0 || ceiling.Quantity < l.Quantity) {
+		l.Quantity = max(ceiling.Quantity, l.Ordered+l.ReservedUnits)
+	}
+	return l, nil
+}
+
+// Tightened reports whether an envelope currently bounds this lease more tightly
+// than the lease itself does — the operator-facing question, and the one worth
+// surfacing in a report, because a lease that reads 1000 while only 200 is
+// spendable is otherwise a confusing thing to be shown.
+func (l Lease) Tightened(env Envelope) bool {
+	bounded, err := l.Constrain(env)
+	if err != nil {
+		// A capability the envelope no longer bounds is as tight as it gets.
+		return true
+	}
+	return bounded.Amount < l.Amount || (bounded.Quantity > 0 && l.Quantity > 0 && bounded.Quantity < l.Quantity) ||
+		(bounded.Quantity > 0 && l.Quantity <= 0)
+}
+
+// Grant is the whole of the authority a cell acts under for one capability: the
+// envelope that bounds it and the lease it spends from.
+//
+// The two travel together because neither decides anything alone. The lease says
+// what was exclusively allocated; the envelope says what the overseer will stand
+// behind *now*. An effectful action needs both to say yes (§6.7 rules 4 and 5),
+// and a caller holding only one of them cannot answer the question.
+type Grant struct {
+	Envelope Envelope
+	// Lease is nil when the cell holds none for this capability, which is a
+	// refusal rather than a fallback to the envelope: an effectful action spends
+	// from an exclusive allocation, never from a shared ceiling.
+	Lease *Lease
+	// LeaseHash is the object hash the lease was read at, for the CAS on a hold
+	// or a settlement.
+	LeaseHash string
+}
+
+// Bounded is the lease as the envelope currently constrains it — the view every
+// spend decision should be made against.
+//
+// It is deliberately awkward to get at the raw lease for a decision: reaching
+// for g.Lease directly is how a tightened envelope gets ignored.
+func (g Grant) Bounded() (*Lease, error) {
+	if g.Lease == nil {
+		return nil, nil
+	}
+	if err := g.Envelope.Validate(); err != nil {
+		// No usable envelope means nothing establishes that the overseer still
+		// stands behind this spend. Refusing is the only safe reading; treating a
+		// malformed envelope as absent would make it the widest one.
+		return nil, fmt.Errorf("authority: cannot bound the lease for %s/%s: %w", g.Lease.CellID, g.Lease.Capability, err)
+	}
+	bounded, err := g.Lease.Constrain(g.Envelope)
+	if err != nil {
+		return nil, err
+	}
+	return &bounded, nil
+}
+
+// money formats an amount for a message a person reads.
+//
+// Currency in float64 accumulates representation error — 1000 - 320 - 355.40
+// prints as 44.60000000000002 — and a refusal about money that renders like
+// that costs the reader confidence in the number. Formatting is a patch over the
+// display, not over the arithmetic: representing amounts in minor units is the
+// real fix, and it is not this function.
+func money(v float64) string {
+	rounded := math.Round(v*100) / 100
+	return strconv.FormatFloat(rounded, 'f', -1, 64)
 }

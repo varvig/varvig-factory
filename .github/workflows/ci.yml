@@ -75,7 +75,7 @@ jobs:
       # next to the code that refuses. Same reason for the separate step: a
       # double-spend guard failing should be legible without opening a log.
       - name: conformance (spec §9.10-9.16, authority and effects)
-        run: go test -v -run 'Test1[0-9][a-c]?_' ./authority/ ./effect/
+        run: go test -v -run 'Test1[0-9][a-d]?_' ./authority/ ./effect/
 
       # The guards, likewise separate. A failure here means the code has grown
       # something the design forbids — a second scheduler, a branch on cell class,

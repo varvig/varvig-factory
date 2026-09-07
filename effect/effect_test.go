@@ -45,6 +45,21 @@ func heldLease(c Capability, amount float64) *authority.Lease {
 	}
 }
 
+// wideEnvelope bounds the capability far above any lease in these tests, so the
+// envelope is never the thing doing the refusing here. Tightening has its own
+// test (§9.12).
+func wideEnvelope(c Capability) authority.Envelope {
+	return authority.Envelope{
+		Overseer: "overseer-a", SetAt: at.Unix(),
+		Ceilings: []authority.Ceiling{{Capability: c.ID, Spend: 1000000, Unit: "EUR", Quantity: 100000}},
+	}
+}
+
+// granted is the ordinary case: a wide envelope and the cell's own lease.
+func granted(c Capability, lease *authority.Lease) authority.Grant {
+	return authority.Grant{Envelope: wideEnvelope(c), Lease: lease}
+}
+
 func order(t *testing.T, c Capability) Request {
 	t.Helper()
 	return Request{
@@ -63,7 +78,7 @@ var online = authority.Sync{Configured: true, Reachable: true, At: at}
 
 func TestAWellFormedOrderIsAllowed(t *testing.T) {
 	c := fabrication(t)
-	d := Check(order(t, c), "mini-a", heldLease(c, 1000), online, clock, 0)
+	d := Check(order(t, c), "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0)
 	if !d.Allowed {
 		t.Fatalf("a well-formed authorized order inside its lease was refused: %s", d.Error())
 	}
@@ -79,7 +94,7 @@ func Test10_EffectfulSpeculationIsRejected(t *testing.T) {
 	req := order(t, c)
 	req.Attempts = 3
 
-	d := Check(req, "mini-a", heldLease(c, 1000), online, clock, 0)
+	d := Check(req, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0)
 	if d.Allowed {
 		t.Fatal("three attempts at a board order were allowed; that is three invoices")
 	}
@@ -95,7 +110,7 @@ func Test10_EffectfulSpeculationIsRejected(t *testing.T) {
 	// Zero is not "unspecified, assume one" either — an unset field on this path
 	// is a task that never considered the question.
 	req.Attempts = 0
-	if Check(req, "mini-a", heldLease(c, 1000), online, clock, 0).Allowed {
+	if Check(req, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0).Allowed {
 		t.Fatal("an unspecified attempt count was treated as one")
 	}
 }
@@ -106,7 +121,7 @@ func Test11_Idempotency(t *testing.T) {
 	c := fabrication(t)
 	req := order(t, c)
 
-	first := Check(req, "mini-a", heldLease(c, 1000), online, clock, 0)
+	first := Check(req, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0)
 	if !first.Allowed {
 		t.Fatalf("first attempt refused: %s", first.Error())
 	}
@@ -119,7 +134,7 @@ func Test11_Idempotency(t *testing.T) {
 	// Map ordering must not matter, so hand the payload back with its keys
 	// written in the other order.
 	retry.Payload = map[string]any{"quantity": 5, "gerber": "1e20deadbeef"}
-	second := Check(retry, "mini-a", heldLease(c, 1000), online, clock, 0)
+	second := Check(retry, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0)
 	if second.Key != first.Key {
 		t.Fatalf("the retry derived key %s, the original %s; the same action would be placed twice", second.Key, first.Key)
 	}
@@ -128,14 +143,14 @@ func Test11_Idempotency(t *testing.T) {
 	// first — otherwise a genuine second order would be swallowed as a duplicate.
 	other := order(t, c)
 	other.Payload = map[string]any{"gerber": "1e20deadbeef", "quantity": 6}
-	if k := Check(other, "mini-a", heldLease(c, 1000), online, clock, 0).Key; k == first.Key {
+	if k := Check(other, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0).Key; k == first.Key {
 		t.Fatal("ordering a different quantity produced the same key; a real order would be dropped as a duplicate")
 	}
 
 	// Nor may a different task reuse a key, even for an identical payload.
 	sameOrderOtherTask := order(t, c)
 	sameOrderOtherTask.Task = "T-1043"
-	if k := Check(sameOrderOtherTask, "mini-a", heldLease(c, 1000), online, clock, 0).Key; k == first.Key {
+	if k := Check(sameOrderOtherTask, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0).Key; k == first.Key {
 		t.Fatal("two tasks ordering the same board shared a key")
 	}
 
@@ -159,7 +174,7 @@ func Test11_Idempotency(t *testing.T) {
 	// up whether the action already happened before deciding anything else.
 	refused := order(t, c)
 	refused.AuthorizedBy = ""
-	if d := Check(refused, "mini-a", heldLease(c, 1000), online, clock, 0); d.Allowed || d.Key != first.Key {
+	if d := Check(refused, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0); d.Allowed || d.Key != first.Key {
 		t.Fatalf("a refusal did not carry the action's key (allowed=%v key=%q)", d.Allowed, d.Key)
 	}
 }
@@ -171,7 +186,7 @@ func Test15_NoSelfAuthorization(t *testing.T) {
 	req := order(t, c)
 	req.AuthorizedBy = "mini-a" // the acting cell, promote rights or not
 
-	d := Check(req, "mini-a", heldLease(c, 1000), online, clock, 0)
+	d := Check(req, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0)
 	if d.Allowed {
 		t.Fatal("a cell authorized its own effectful action")
 	}
@@ -189,7 +204,7 @@ func Test15_NoSelfAuthorization(t *testing.T) {
 	// An absent principal is refused on the same rule rather than defaulting to
 	// the acting cell.
 	req.AuthorizedBy = ""
-	if d := Check(req, "mini-a", heldLease(c, 1000), online, clock, 0); d.Allowed || !d.Escalate {
+	if d := Check(req, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0); d.Allowed || !d.Escalate {
 		t.Fatalf("an unauthorized effectful action was allowed or did not escalate: %s", d.Error())
 	}
 }
@@ -205,7 +220,7 @@ func Test16_InterfaceHashBinding(t *testing.T) {
 	if err := aliasOnly.Validate(); err == nil {
 		t.Fatal("a capability referencing only an alias validated")
 	}
-	if d := Check(order(t, aliasOnly), "mini-a", heldLease(c, 1000), online, clock, 0); d.Allowed {
+	if d := Check(order(t, aliasOnly), "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0); d.Allowed {
 		t.Fatal("an alias-only capability reference was allowed to act")
 	}
 
@@ -257,7 +272,7 @@ func TestOrdinaryCapabilitiesDoNotTravelThisPath(t *testing.T) {
 	// so an unmarked one reaching here means someone's wiring is wrong.
 	c := fabrication(t)
 	c.Effectful = false
-	if d := Check(order(t, c), "mini-a", heldLease(c, 1000), online, clock, 0); d.Allowed {
+	if d := Check(order(t, c), "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0); d.Allowed {
 		t.Fatal("a capability not marked effectful was processed on the effectful path")
 	}
 }
@@ -268,7 +283,7 @@ func TestSpendComesFromTheActingCellsOwnLease(t *testing.T) {
 	// Another cell's lease is not spendable here, however much headroom it has.
 	other := heldLease(c, 100000)
 	other.CellID = "mini-b"
-	d := Check(order(t, c), "mini-a", other, online, clock, 0)
+	d := Check(order(t, c), "mini-a", granted(c, other), online, clock, 0)
 	if d.Allowed {
 		t.Fatal("a cell spent from another cell's lease")
 	}
@@ -278,12 +293,12 @@ func TestSpendComesFromTheActingCellsOwnLease(t *testing.T) {
 
 	// No lease at all escalates, even online: an effectful action spends from an
 	// exclusive allocation, never from the shared envelope.
-	if d := Check(order(t, c), "mini-a", nil, online, clock, 0); d.Allowed || !d.Escalate {
+	if d := Check(order(t, c), "mini-a", authority.Grant{Envelope: wideEnvelope(c)}, online, clock, 0); d.Allowed || !d.Escalate {
 		t.Fatalf("an action with no lease was allowed or did not escalate: %s", d.Error())
 	}
 
 	// Beyond the lease escalates rather than falling back to the envelope.
-	if d := Check(order(t, c), "mini-a", heldLease(c, 100), online, clock, 0); d.Allowed || !d.Escalate {
+	if d := Check(order(t, c), "mini-a", granted(c, heldLease(c, 100)), online, clock, 0); d.Allowed || !d.Escalate {
 		t.Fatalf("spend beyond the lease was allowed or did not escalate: %s", d.Error())
 	}
 }
@@ -294,7 +309,7 @@ func TestOfflineOrderInsideItsLeaseIsAllowed(t *testing.T) {
 	// lease was issued.
 	c := fabrication(t)
 	offline := authority.Sync{Configured: true, Reachable: false, At: at.Add(-72 * time.Hour)}
-	if d := Check(order(t, c), "mini-a", heldLease(c, 1000), offline, clock, 0); !d.Allowed {
+	if d := Check(order(t, c), "mini-a", granted(c, heldLease(c, 1000)), offline, clock, 0); !d.Allowed {
 		t.Fatalf("a disconnected cell was refused an order inside its own lease: %s", d.Error())
 	}
 
@@ -303,7 +318,7 @@ func TestOfflineOrderInsideItsLeaseIsAllowed(t *testing.T) {
 	// failure legible.
 	quoted := c
 	quoted.CostModel = CostQuoted
-	d := Check(order(t, quoted), "mini-a", heldLease(c, 1000), offline, clock, 0)
+	d := Check(order(t, quoted), "mini-a", granted(c, heldLease(c, 1000)), offline, clock, 0)
 	if d.Allowed {
 		t.Fatal("a quoted capability was priced with no reachable service")
 	}
@@ -328,7 +343,7 @@ func TestEveryUnmetRuleIsReported(t *testing.T) {
 	req.Amount = 99999
 	req.Unit = "USD"
 
-	d := Check(req, "mini-a", heldLease(c, 1000), online, clock, 0)
+	d := Check(req, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0)
 	if d.Allowed {
 		t.Fatal("a request breaking four rules was allowed")
 	}
@@ -341,7 +356,7 @@ func TestUnlikeUnitsAreRefused(t *testing.T) {
 	c := fabrication(t)
 	req := order(t, c)
 	req.Unit = "USD"
-	d := Check(req, "mini-a", heldLease(c, 1000), online, clock, 0)
+	d := Check(req, "mini-a", granted(c, heldLease(c, 1000)), online, clock, 0)
 	if d.Allowed {
 		t.Fatal("an order priced in USD spent from a EUR lease")
 	}

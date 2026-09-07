@@ -447,6 +447,38 @@ Four rules:
   that can be exceeded by drawing on the shared ceiling is advisory, and an
   advisory exclusive allocation is a shared one.
 
+**Tightening bites; loosening does not.** An overseer who narrows an envelope
+mid-run has the tighter ceiling honoured before the cell's next effectful
+action, and with *no fresh sync*, because adopting a tighter ceiling can only
+reduce spend — being wrong means spending less than authorized, which nobody has
+to undo. A *wider* envelope grants a cell nothing: the effective allocation is
+the minimum of the lease and the ceiling, so more headroom requires a **new
+lease**, which only the overseer can write and which the cell therefore cannot
+see without syncing.
+
+The minimum is the whole mechanism, and it is why there is no freshness check in
+this path: §4.3b's point is that effectful action inside a lease needs no
+connectivity, and a staleness test here would take that back.
+
+Two things this does *not* buy, stated because a cap is easy to mistake for a
+guarantee:
+
+- **The ceiling is shared, so local capping does not bound the sum.** Three cells
+  each capping themselves at one ceiling still permits their total to exceed it.
+  Tightening is enforced by the overseer **not replenishing**; the cell-side cap
+  is a floor of safety underneath that.
+- **It cannot claw back an unspent lease without reaching the cell.** A
+  partitioned cell has not seen the tightening and will spend its lease. That is
+  acceptable rather than a hole, because exposure was already bounded by the
+  lease amount when it was issued.
+
+A tightening never un-spends money. A ceiling below what is already spent means
+nothing further is spendable, not that spend is reversed.
+
+The bounded lease is a **view for deciding, never a value to store.** Writing it
+back would rewrite the record of what the overseer committed to, which is the
+evidence for every later question about the spend.
+
 `reclaim_after` is a **signal to the overseer, not an expiry**. It does not stop
 the holder spending. A lease with any recorded spend is never reclaimed, because
 the cell may have placed an order it has not yet reported, and reclaiming there
@@ -639,9 +671,10 @@ rationale.
 
 ## 11. What this contract does not yet cover
 
-The design notes moved ahead of this implementation in four places. They are
-listed here rather than left to be discovered, because a contract that quietly
-omits a rule reads exactly like one that has decided against it.
+The design notes moved ahead of this implementation in three places, and one
+representation choice here is worth flagging. They are listed rather than left
+to be discovered, because a contract that quietly omits a rule reads exactly
+like one that has decided against it.
 
 **Cell classes, not tiers, and factories are flat.** Micro, Mini and Medium
 describe *capacity*; a factory is one or more cooperating cells with no
@@ -665,10 +698,9 @@ derives a cell's standing from its promotion history rather than from what it
 declares about itself. Today only the agreement-rate metric (§9) is derived, and
 it is per scope rather than per cell.
 
-**Envelope tightening is not implemented.** An overseer who narrows an envelope
-mid-run should have the tighter ceiling honoured before the next effectful
-action, while a *loosening* should not apply until the cell has synced — the
-asymmetry being that a tighter ceiling is safe to adopt from any view and a
-looser one is not. Today a cell checks its lease, which an envelope change does
-not touch, so tightening the envelope does not reach a lease already issued;
-reducing exposure means reclaiming or reissuing leases.
+**Money is a float64.** Amounts are `float64` throughout, so ordinary
+arithmetic accumulates representation error: 1000 − 320 − 355.40 is 44.600000000
+00002, and refusal messages round for display rather than being exact. Nothing
+here compares amounts for equality, so no decision turns on it today — but minor
+units (integer cents) are the right representation for a system that spends
+money, and the display rounding is a patch over the symptom.

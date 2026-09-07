@@ -350,7 +350,8 @@ func run() error {
 		Amount:  320, Quantity: 5, Unit: "EUR",
 		AuthorizedBy: "overseer-a",
 	}
-	dec := effect.Check(order, "mini-a", &lease, disconnected.Sync, func() time.Time { return clock }, 0)
+	grant := authority.Grant{Envelope: envelope, Lease: &lease}
+	dec := effect.Check(order, "mini-a", grant, disconnected.Sync, func() time.Time { return clock }, 0)
 	fmt.Printf("  offline order of 320 EUR inside a 1000 EUR lease: allowed=%v key=%s…\n", dec.Allowed, dec.Key[:12])
 
 	// The same intent, retried after the response was lost. Note the payload is
@@ -358,16 +359,17 @@ func run() error {
 	// the action *is*, so this is one order, not two.
 	retry := order
 	retry.Payload = map[string]any{"quantity": 5, "gerber": short(third.Change)}
-	again := effect.Check(retry, "mini-a", &lease, disconnected.Sync, func() time.Time { return clock }, 0)
+	again := effect.Check(retry, "mini-a", grant, disconnected.Sync, func() time.Time { return clock }, 0)
 	fmt.Printf("  the retry after a lost response derives the same key: %v\n", again.Key == dec.Key)
 
 	// Reserve, execute, settle. The key is claimed in a ref before the effect is
 	// attempted, create-only — and the same write holds the lease headroom, so a
 	// second pending order cannot pass the same headroom check.
 	current, readAt := must2(authority.LoadLease(mini.v, "mini-a", "pcb-fabrication@1"))
-	claim := must1(effect.Reserve(mini.v, order, "mini-a", current, readAt, clock.Unix(), 3600))
+	held := authority.Grant{Envelope: envelope, Lease: &current, LeaseHash: readAt}
+	claim := must1(effect.Reserve(mini.v, order, "mini-a", held, clock.Unix(), 3600))
 	fmt.Printf("  reserved: %s\n", claim.Reservation)
-	fmt.Printf("  the lease now holds %g EUR against it, leaving %g of %g\n",
+	fmt.Printf("  the lease now holds %.2f EUR against it, leaving %.2f of %.2f\n",
 		claim.Lease.Reserved, claim.Lease.Headroom(), claim.Lease.Amount)
 
 	// A second order that fits the allocation but not the remaining headroom is
@@ -375,41 +377,69 @@ func run() error {
 	// would wave it through and the two together would exceed the lease.
 	competing := order
 	competing.Task, competing.Amount = ticket+"-b", 800
-	_, tooMuch := effect.Reserve(mini.v, competing, "mini-a", claim.Lease, claim.LeaseHash, clock.Unix()+1, 3600)
+	_, tooMuch := effect.Reserve(mini.v, competing, "mini-a",
+		authority.Grant{Envelope: envelope, Lease: &claim.Lease, LeaseHash: claim.LeaseHash}, clock.Unix()+1, 3600)
 	fmt.Printf("  a second 800 EUR order while the first is pending: %v\n", tooMuch != nil)
 
 	// The order goes through, and settlement converts the hold into spend at the
 	// price actually charged rather than the one quoted.
 	claim = must1(effect.Settle(mini.v, claim, "PO-90210", 355.40, clock.Add(time.Minute).Unix()))
-	fmt.Printf("  settled: %g EUR spent of %g, %g left (%s)\n",
+	fmt.Printf("  settled: %.2f EUR spent of %.2f, %.2f left (%s)\n",
 		claim.Lease.Spent, claim.Lease.Amount, claim.Lease.Headroom(), claim.Reservation.Detail)
 
 	// The same action again is refused by varvig's ordinary ref CAS, and told
 	// what happened rather than placing a second order.
-	_, repeat := effect.Reserve(mini.v, retry, "mini-a", claim.Lease, claim.LeaseHash, clock.Add(time.Hour).Unix(), 3600)
+	_, repeat := effect.Reserve(mini.v, retry, "mini-a",
+		authority.Grant{Envelope: envelope, Lease: &claim.Lease, LeaseHash: claim.LeaseHash}, clock.Add(time.Hour).Unix(), 3600)
 	fmt.Printf("  the same action reserved again: %v\n", repeat)
 
 	// Exposure is what the overseer reasons about, and it is the sum of lease
 	// *headroom*: what is spent is gone, and what is held may already be an order
 	// at the far end. Neither is still allocatable.
-	fmt.Printf("  outstanding exposure for pcb-fabrication@1: %g EUR\n",
+	fmt.Printf("  outstanding exposure for pcb-fabrication@1: %.2f EUR\n",
 		authority.Exposure(must1(authority.Leases(mini.v, "")))["pcb-fabrication@1"])
 	lease = claim.Lease
+
+	// The overseer tightens the envelope to 400 EUR — below what this lease still
+	// has. The cell honours it before its next action, with no sync and no
+	// reissued lease, because adopting a tighter ceiling can only reduce spend.
+	tightened := envelope
+	tightened.Ceilings = []authority.Ceiling{{
+		Capability: "pcb-fabrication@1", Spend: 400, Unit: "EUR", Quantity: 100, RatePerDay: 4,
+	}}
+	must1(authority.PublishEnvelope(mini.v, tightened,
+		must1(mini.v.ResolveRef(must1(cell.EnvelopeRef(envelope.Overseer))))))
+	bounded := must1(authority.Grant{Envelope: tightened, Lease: &claim.Lease}.Bounded())
+	fmt.Printf("  --- overseer tightens the envelope to 400 EUR ---\n")
+	fmt.Printf("  the lease still reads %.2f EUR; spendable is now %.2f\n", claim.Lease.Amount, bounded.Headroom())
+
+	// Loosening, by contrast, grants nothing: the minimum is still the lease, so
+	// more headroom needs a new lease the overseer has to write.
+	loosened := envelope
+	loosened.Ceilings = []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 99999, Unit: "EUR"}}
+	wide := must1(authority.Grant{Envelope: loosened, Lease: &claim.Lease}.Bounded())
+	fmt.Printf("  a loosened envelope leaves it at %.2f: widening needs a new lease\n", wide.Headroom())
+	envelope = tightened
 
 	// Beyond the lease escalates rather than drawing on the 5000 EUR envelope.
 	// A lease that can be exceeded is advisory, and an advisory exclusive
 	// allocation is a shared one.
 	tooBig := order
 	tooBig.Amount, tooBig.Quantity = 900, 12
-	beyond := effect.Check(tooBig, "mini-a", &lease, disconnected.Sync, func() time.Time { return clock }, 0)
-	fmt.Printf("  a 900 EUR order with %g EUR left: allowed=%v escalate=%v\n", lease.Headroom(), beyond.Allowed, beyond.Escalate)
+	lease = claim.Lease
+	beyond := effect.Check(tooBig, "mini-a", authority.Grant{Envelope: envelope, Lease: &lease},
+		disconnected.Sync, func() time.Time { return clock }, 0)
+	fmt.Printf("  a 900 EUR order with %.2f EUR spendable: allowed=%v escalate=%v\n", bounded.Headroom(), beyond.Allowed, beyond.Escalate)
 	fmt.Println(indent(beyond.Error()))
 
 	// And the cell cannot authorize its own order, holding a promote key or not.
 	// Promote rights move refs; they are not a licence to spend money.
 	itself := order
 	itself.AuthorizedBy = "mini-a"
-	self := effect.Check(itself, "mini-a", &lease, disconnected.Sync, func() time.Time { return clock }, 0)
+	// Checked against the pre-tightening envelope so this beat shows one rule
+	// failing, not two: the point here is the principal, not the ceiling.
+	self := effect.Check(itself, "mini-a", authority.Grant{Envelope: loosened, Lease: &lease},
+		disconnected.Sync, func() time.Time { return clock }, 0)
 	fmt.Printf("  mini-a authorizing its own order, promote key in hand: allowed=%v escalate=%v\n", self.Allowed, self.Escalate)
 	fmt.Println(indent(self.Error()))
 
