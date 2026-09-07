@@ -62,17 +62,24 @@ jobs:
       - name: test (race detector)
         run: go test -race ./...
 
-      # The nine numbered tests of the spec's §9, called out separately so a
-      # failure in one of them is visible as such in the job list rather than
-      # buried in the full run. They are the tests that hold the properties a
-      # federation depends on: partition duplicates, offline operation,
-      # environment determinism, and the refusals that make autonomy defensible.
-      - name: conformance (spec §9)
+      # The spec's §9 items, called out separately so a failure in one of them is
+      # visible as such in the job list rather than buried in the full run. They
+      # are the tests that hold the properties a federation depends on: partition
+      # duplicates, offline operation, environment determinism, and the refusals
+      # that make autonomy defensible.
+      - name: conformance (spec §9.1-9.9)
         run: go test -v -run 'Test0[1-9]_' ./conformance/
 
+      # §9.10 onward live with the packages they constrain rather than in
+      # conformance/, because they are refusals about spending money and belong
+      # next to the code that refuses. Same reason for the separate step: a
+      # double-spend guard failing should be legible without opening a log.
+      - name: conformance (spec §9.10-9.16, authority and effects)
+        run: go test -v -run 'Test1[0-9][a-c]?_' ./authority/ ./effect/
+
       # The guards, likewise separate. A failure here means the code has grown
-      # something the design forbids — a second scheduler, a branch on tier, or a
-      # dependency — and the failure message says which.
+      # something the design forbids — a second scheduler, a branch on cell class,
+      # or a dependency — and the failure message says which.
       - name: guards
         run: go test -v ./guard/
 
@@ -90,6 +97,11 @@ jobs:
       # They skip silently when no binary is present, so without this step they
       # would never run anywhere and the drift they exist to catch would land.
       #
+      # Every package holding integration tests has to be named here — a skipping
+      # test and a passing one look identical in a summary, so a package left off
+      # this line is one nobody notices is unexercised. authority/ and effect/
+      # additionally answer whether core accepts the ref namespaces they claim.
+      #
       # continue-on-error, deliberately: varvig's main is not this repo's
       # dependency to pin, so a breaking change there must not block a Factory PR
       # that is fine on its own terms. The step still goes red and says what broke.
@@ -100,7 +112,7 @@ jobs:
           cd /tmp/varvig/varvig && go build -o /usr/local/bin/varvig ./cmd/varvig
           cd "$GITHUB_WORKSPACE"
           varvig --version
-          go test -v -run Integration ./varvigcli/
+          go test -v -run Integration ./varvigcli/ ./authority/ ./effect/
 
       # The README promises this module has no third-party dependencies, and a
       # vendor SDK behind an adapter would be the vendor leaking through the seam
