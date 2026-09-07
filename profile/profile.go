@@ -254,11 +254,18 @@ type EffectCapabilityConfig struct {
 	// here the ambiguity would be resolved by spending money (§2.1).
 	ID        string `json:"id"`
 	Interface string `json:"interface"`
-	// Executor names the integration. Only "refusing" is built in — it declines
-	// every action, which is how an operator proves the wiring works without
-	// anything being ordered. Real integrations are compiled in by whoever
-	// operates the factory, because Factory owns credentials to external
-	// services and a plugin loader for that is a worse idea than a rebuild.
+	// Executor names the in-process integration. Only "refusing" exists so far —
+	// it declines every action, which is how an operator proves the wiring works
+	// without anything being ordered.
+	//
+	// This field is **not** the extension point, and is not meant to grow a
+	// vendor list. Adding a vendor by rebuilding the cell binary makes no sense,
+	// and it would put that vendor's credentials in the cell process. The
+	// extension point is a connector peer answering reservations from the
+	// repository — the shape core already uses for tracker bridges, where the
+	// connector holds the vendor's credentials, runs anywhere, and needs no
+	// recompile. That protocol is the next piece of work; until it lands, this
+	// selects between the built-ins.
 	Executor string `json:"executor,omitempty"`
 }
 
@@ -411,13 +418,14 @@ func (c Config) Capabilities() cell.Capabilities {
 	return caps
 }
 
-// buildExecutors turns the configured capabilities into executors.
+// buildExecutors turns the configured capabilities into in-process executors.
 //
-// Only the refusing executor is built in, and that is deliberate: a real
-// integration holds credentials to a service that charges money, so it is
-// compiled in by whoever operates the factory. A plugin loader here would mean
-// arbitrary code reached by name from a config file, in the one path that
-// spends — which is a worse idea than a rebuild.
+// The set is deliberately small and is not where vendors get added: an
+// integration holding credentials to a service that charges money belongs in a
+// separate process, not in the cell binary and not behind a name in a config
+// file. Vendors arrive as connector peers answering reservations from the
+// repository, which is core's own pattern for tracker bridges and needs no
+// rebuild — see EffectCapabilityConfig.Executor.
 func (c Config) buildExecutors() (effect.Executors, error) {
 	var out effect.Executors
 	for _, e := range c.Effects.Capabilities {
@@ -431,7 +439,7 @@ func (c Config) buildExecutors() (effect.Executors, error) {
 			// named must not silently become one that acts.
 			out = append(out, effect.Refusing{Capability: capability})
 		default:
-			return nil, fmt.Errorf("profile: capability %q names executor %q, which this build does not contain; real integrations are compiled in", e.ID, e.Executor)
+			return nil, fmt.Errorf("profile: capability %q names in-process executor %q, which this build does not contain; vendor integrations arrive as connector peers rather than by name here", e.ID, e.Executor)
 		}
 	}
 	return out, nil

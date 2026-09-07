@@ -448,11 +448,17 @@ problem afterwards.
 
 The executor is a seam like the model runtime and the build sandbox, and for a
 sharper reason than either: the alternative to a fake is a real board order. Only
-a **refusing** executor is built in — pointing a cell at it proves the wiring
+a **refusing** executor exists so far — pointing a cell at it proves the wiring
 works, with the ticket claimed, quoted, authorized and reserved, and nothing
-ordered. Real integrations are compiled in by whoever operates the factory,
-because a plugin loader reached by name from a config file, in the one path that
-spends money, is a worse idea than a rebuild.
+ordered.
+
+**This is not yet the extension point.** Adding a vendor by rebuilding the cell
+binary makes no sense, and it would put that vendor's credentials in the cell
+process. Vendors will arrive as **connector peers** answering reservations from
+the repository — the shape core already uses for tracker bridges, where the
+connector holds the external credentials, is untrusted, runs anywhere, and needs
+no recompile. That protocol is the next piece of work; what is here is the
+in-process default it will sit alongside.
 
 ### What the cell does after it acts
 

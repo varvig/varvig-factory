@@ -40,7 +40,7 @@ func TestEffectConfigWiresCapabilitiesAndDefaultsToRefusing(t *testing.T) {
 	// acts — or to one that silently does not.
 	c.Effects.Capabilities = []EffectCapabilityConfig{{ID: "x@1", Interface: iface, Executor: "acme-boards"}}
 	_, err = c.buildExecutors()
-	if err == nil || !strings.Contains(err.Error(), "compiled in") {
+	if err == nil || !strings.Contains(err.Error(), "connector peers") {
 		t.Fatalf("an unknown executor name gave %v", err)
 	}
 }
