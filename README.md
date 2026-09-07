@@ -154,12 +154,13 @@ override.
 4. **Path scope must be explicitly enabled.** Per-path, never global.
 5. **A promotion-agreement metric must exist** for that scope, above threshold.
 
-Two more, which are not additions to the policy but the surrounding facts without
-which the five would be checking a promotion that could not happen anyway: the
-trust store must actually grant `promote` at that path, and the policy module
-must return `promote`. An **unconfigured gate is not an approving gate** — the
-promotion rule has to be a reviewed, versioned object, and "there isn't one" is
-not consent.
+Three more, which are not additions to the policy but the surrounding facts
+without which the five would be checking a promotion that could not happen
+anyway: the trust store must actually grant `promote` at that path; the cell's
+view of that trust store must be current ([authority](#authority-spend-that-cannot-be-regenerated));
+and the policy module must return `promote`. An **unconfigured gate is not an
+approving gate** — the promotion rule has to be a reviewed, versioned object, and
+"there isn't one" is not consent.
 
 ### The gate is a wasm policy module
 
@@ -259,6 +260,131 @@ budget on work that proves duplicative.
 varvig-factory budget
 ```
 
+## Authority: spend that cannot be regenerated
+
+The budget above bounds compute, which is regenerable — exceeding it wastes money
+and nothing else. Ordering PCB fabrication, contracting a human, shipping
+something, moving money: those cannot be re-run, discarded, or regenerated, and
+they get a different mechanism.
+
+**The load-bearing distinction is shared versus exclusive authority, not fresh
+versus stale.**
+
+| | Envelope | Lease |
+|---|---|---|
+| What it is | a **shared ceiling** across every cell under one overseer | an **exclusive allocation** to one cell |
+| Ref | `refs/envelopes/<overseer-id>` | `refs/leases/<cell-id>/<capability>` |
+| Enforceable from a stale view? | no — another cell may have spent it | yes — nobody else can spend it |
+| Spendable offline | no | **yes, indefinitely** |
+
+That table is why a disconnected cell can keep doing real work. The amount was
+committed when the lease was issued, so there is no connectivity in the spend
+path and no renewal protocol to add. Grouped by reversibility rather than by
+"is it a write":
+
+| Act | With a stale view of trust state |
+|---|---|
+| Propose | allowed — append-only bounds the damage |
+| Promote | **refused** — it moves a ref, and a shared ceiling cannot be enforced locally |
+| Effectful | allowed **within an outstanding lease**; refused with no lease |
+
+Beyond the lease **escalates and never falls back to the envelope**: a lease that
+can be exceeded by drawing on the shared ceiling is advisory, and an advisory
+exclusive allocation is a shared one. `reclaim_after` is a signal to the
+overseer, not an expiry — it does not stop the holder spending, and a lease with
+any recorded spend is never reclaimed, because the cell may have placed an order
+it has not yet reported.
+
+```sh
+varvig-factory authority          # leases, exposure, and the ceilings they draw on
+```
+
+That report reads **every** cell's leases, not only the local one, because the
+sum is the number that matters and a cell can only see its own share. It also
+re-checks the exclusivity invariant against the envelope and says so loudly if
+outstanding leases have drifted past the ceiling — because if they have, the
+exposure figure above it is wrong.
+
+Two defaults worth stating, since both are places where a plausible choice is
+wrong:
+
+- **An envelope with no ceilings is malformed, not unlimited**, and an unlisted
+  capability has no ceiling to be under. Silence is not permission.
+- **There is no staleness clock by default.** A successful sync establishes
+  current state; adding an age threshold on top would be inventing policy. An
+  operator who wants one — for a sync loop that has stalled without failing —
+  configures `max_trust_age`.
+
+### Why freshness is Factory's job and not varvig's
+
+Not a division of labour, a structural fact: varvig's ref-update verification
+checks a signer against the trust file *as the verifying peer holds it*, and a
+partitioned peer holds a stale file it has every reason to believe is current.
+Nothing inside varvig can tell the difference. The loop, which ran the sync, can
+— so it records `Reachable` and `At`, and promotion reads them.
+
+None of this asks varvig to change. Envelopes, leases and reservations are refs
+under new prefixes, signed and CAS-updated like any other.
+
+### Effectful capabilities are built as refusals
+
+An effectful capability looks exactly like an ordinary one until the invoice
+arrives, so [`effect/`](./effect/effect.go) is the guards first and the happy
+path last:
+
+1. **`attempts` is 1 — by rejection, not by clamping.** `--attempts 3` on a
+   board order means three orders and three invoices. A clamp would execute
+   something other than what was asked for, on the one class of action where
+   that means a wrong order rather than a wasted GPU-hour.
+2. **A mandatory idempotency key**, *derived* from `(task-id, capability alias,
+   interface hash, canonical payload)` with each component length-prefixed. A
+   retry after a mid-flight network failure recomputes the same key from the same
+   intent, so "the same action" and "the same key" cannot drift apart.
+3. **A cell never authorizes its own effectful action** — not even holding a
+   factory key with `promote`. Promote rights move refs; they are not a licence
+   to spend money, and conflating the two turns a scoped repository credential
+   into a purchasing credential. The authorizing principal need not be human: an
+   overseer agent satisfies this fully.
+4. **Bounded by the envelope, spent from the acting cell's own lease.** Another
+   cell's lease is not spendable, however much headroom it has.
+5. **Never auto-retried, never regenerated.** A failure escalates; retry is an
+   authorized decision, not a loop behaviour.
+
+A capability reference names the **interface hash**, not only the alias — two
+factories may hold the same alias without agreeing who owns the name, so matching
+is on the hash, and an alias match with a hash mismatch is the collision the
+binding exists to catch. The hash is in the idempotency key too, so re-pointing
+an alias cannot make a new action look like an old one.
+
+### Reserve, execute, settle
+
+A derived key says what "the same action" means; it does not stop the action
+happening twice. The key is claimed in a ref — create-only, so whoever creates it
+executes and everyone else is refused — **before** the effect is attempted:
+
+```
+reserve  ->  refs/reservations/<cell-id>/<key>  = pending
+execute  ->  the external effect
+settle   ->  done, with the far end's own order number
+```
+
+A crash in the middle leaves `pending`, which is the honest record of the state
+that matters: the cell does not know whether the order was placed. It escalates.
+It is **not** retried, and the reservation is **not** deleted to clear the way —
+deleting it is exactly how the second invoice arrives. A timeout stays pending
+rather than becoming `failed`, because "we never heard back" and "it did not
+happen" are different claims. And a cell cannot resolve its own pending
+reservation: checking the far end and asserting what is true there is the same
+class of act as authorizing the spend was.
+
+`varvig-factory authority` leads with those unresolved actions, before the
+leases, because they are the only line on that page that might be an order nobody
+knows about.
+
+Every unmet rule is reported at once. Elsewhere an early exit saves an expensive
+re-verification; nothing here is expensive, and an operator about to spend money
+should see the whole list rather than one round trip per broken rule.
+
 ## Adapters
 
 Three seams. Everything hardware- or vendor-shaped lives behind them, so neither
@@ -342,6 +468,11 @@ inference/           model-runtime seam
 sandbox/             build-sandbox seam
 artifact/            artifact-store seam
 budget/              spend caps, halt behaviour, storage-pressure relief
+authority/           envelopes and leases: shared ceilings versus exclusive
+                     allocations, what a stale view still permits, and the refs
+                     they live in
+effect/              effectful, non-regenerable capabilities — the refusals,
+                     and reserve/execute/settle over a reservation ref
 claim/               claim policy: should this cell attempt this ticket?
 loop/                the ten-step cell loop, and verification of peer attempts
 gate/                the wasm promotion-policy module interface
@@ -462,6 +593,21 @@ hold:
 | 8 | `Test08_AgreementRateGate` | refuses below threshold, with the numbers |
 | 9 | `Test09_NoSecondScheduler` | submits the declared scope; never derives one |
 
+The authority model's numbered items live with the code they constrain, in
+[`authority/`](./authority/authority_test.go) and
+[`effect/`](./effect/effect_test.go):
+
+| # | Test | What it holds |
+|---|---|---|
+| 10 | `Test10_EffectfulSpeculationIsRejected` | `--attempts 3` on an effectful capability is rejected, **not clamped** |
+| 11 | `Test11_Idempotency` | a retry after a mid-flight network failure derives the same key, so the action happens once |
+| 11b | `Test11b_ReservationExecutesOnce` | the key claimed in a ref before executing; a repeat is refused and told the outcome |
+| 13 | `Test13_StaleStateBehaviour` | offline: propose yes, promote no, effectful yes within a lease |
+| 13b | `Test13b_LeaseExclusivity` | leases never overlap and never sum past the envelope |
+| 13c | `Test13c_StrandedLease` | reclaim is provisional; a lease with recorded spend is never reclaimed |
+| 15 | `Test15_NoSelfAuthorization` | a promote key is not a purchasing credential |
+| 16 | `Test16_InterfaceHashBinding` | alias-only references are refused; same alias, different hash does not match |
+
 Several of these exist, in the spec's words, "to keep it that way": the behaviour
 is already correct, and the test is there so a later refactor cannot quietly make
 it not. §9.2 in particular guards against somebody "fixing" duplicate attempts.
@@ -479,13 +625,13 @@ go test -coverpkg=./... ./...
 
 ### Integration tests against a real core
 
-`varvigcli` also has tests that drive the actual `varvig` binary. They **skip**
-when one is not on `PATH`, so CI stays green without it, and they run for anyone
-who has one:
+`varvigcli` and `authority` also have tests that drive the actual `varvig`
+binary. They **skip** when one is not on `PATH`, so CI stays green without it,
+and they run for anyone who has one:
 
 ```sh
 go build -o /usr/local/bin/varvig ./cmd/varvig   # in a varvig/varvig checkout
-go test -run Integration ./varvigcli/
+go test -run Integration ./varvigcli/ ./authority/ ./effect/
 ```
 
 These earn their keep. Every other test in that package pins a CLI format by
@@ -497,6 +643,13 @@ unconditionally* rather than *must not exist* — so a real cell would have sile
 overwritten attempt refs, the one thing the contract forbids. The Fake enforced
 create-only correctly, and that is exactly how a fake stricter than reality hides
 a bug.
+
+The `authority` and `effect` integration tests answer the question no fake can:
+whether a real core accepts `refs/envelopes/`, `refs/leases/` and
+`refs/reservations/` at all, and whether create-only really is create-only there.
+It does, and it is — they are ordinary refs under unreserved prefixes, which is
+what makes the whole spend model deployable against today's core with no changes
+to it.
 
 ## Build order
 

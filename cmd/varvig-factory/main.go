@@ -11,12 +11,15 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/varvig/varvig-factory/agreement"
+	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/cell"
+	"github.com/varvig/varvig-factory/effect"
 	"github.com/varvig/varvig-factory/gate"
 	"github.com/varvig/varvig-factory/profile"
 	"github.com/varvig/varvig-factory/promote"
@@ -51,6 +54,7 @@ func main() {
 		"promote":      cmdPromote,
 		"agreement":    cmdAgreement,
 		"budget":       cmdBudget,
+		"authority":    cmdAuthority,
 		"gate":         cmdGate,
 		"version":      cmdVersion,
 	}
@@ -88,6 +92,9 @@ promotable changes on top of varvig.
   varvig-factory agreement [-c F] [--scope PATH]
                                     report the promotion-agreement rate per scope
   varvig-factory budget [-c F]      report today's spend against the declared caps
+  varvig-factory authority [-c F]   report unresolved effectful actions, this
+                                    cell's leases, and the outstanding exposure
+                                    they represent (§8.1, §8.2)
   varvig-factory gate --bind MODULE.wasm [-c F]
                                     bind the promotion-policy wasm module (§6.2)
   varvig-factory version
@@ -371,7 +378,7 @@ func cmdPromote(args []string) error {
 		// picks this up on its next one — no restart and no signal (§6.5).
 		fmt.Printf("promotion mode is now %s; this takes effect on the next promotion decision, in this process and in any running loop\n", m)
 		if m == promote.ModeGated {
-			fmt.Println("nothing will be promoted by this cell until a human decides")
+			fmt.Println("nothing will be promoted by this cell until a higher principal decides — a human, or an overseer agent")
 		}
 	}
 	if path := f.values["enable"]; path != "" {
@@ -504,6 +511,129 @@ func cmdBudget(args []string) error {
 		fmt.Println("this cell has stopped claiming; it will not switch to a smaller model to keep working")
 	}
 	return nil
+}
+
+// cmdAuthority reports what this cell may spend on actions that cannot be
+// regenerated, and what the overseer is therefore exposed to.
+//
+// It reads every cell's leases, not only this one's, because the sum of
+// outstanding lease headroom is the number to reason about (§8.1) and a cell
+// looking only at its own share cannot see it. Unresolved reservations are the
+// exception: those are per-cell, because only the cell that reserved one can
+// have been the one to place the order.
+func cmdAuthority(args []string) error {
+	f, err := parseFlags(args, nil, nil)
+	if err != nil {
+		return err
+	}
+	cfg, built, err := load(f)
+	if err != nil {
+		return err
+	}
+	me := cfg.Capabilities().CellID
+
+	// The unresolved-outcome report comes first, because it is the only thing on
+	// this page that might be an order nobody knows about.
+	pending, pendErr := effect.Pending(built.Varvig, me)
+	if pendErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: %v\n", pendErr)
+	}
+	if len(pending) > 0 {
+		fmt.Printf("UNRESOLVED EFFECTFUL ACTIONS (%d) — each one may have happened\n", len(pending))
+		for _, r := range pending {
+			fmt.Printf("  %s\n", r)
+		}
+		fmt.Println("a higher principal checks the external system and records what it found;")
+		fmt.Println("the cell must not retry these and must not clear them (CELL.md §8.2)")
+		fmt.Println()
+	}
+
+	leases, listErr := authority.Leases(built.Varvig, "")
+	if listErr != nil && len(leases) == 0 && len(pending) == 0 {
+		// Nothing was read, so there is nothing to report. Saying "no leases"
+		// here would be reporting an unreadable repository as an empty one, and
+		// "you have no authority to spend" is the wrong thing to tell an
+		// operator whose repository is merely unreachable.
+		return listErr
+	}
+	if listErr != nil {
+		// Some refs read and some did not. Report both: an operator asking about
+		// exposure during an incident should not be handed nothing because one
+		// ref is bad, and must know the number below is incomplete.
+		fmt.Fprintf(os.Stderr, "warning: %v\n", listErr)
+		fmt.Fprintln(os.Stderr, "the exposure below is therefore a lower bound")
+	}
+
+	if len(leases) == 0 {
+		fmt.Println("no leases: this cell has no authority for any effectful capability")
+		fmt.Println("an effectful action spends from an exclusive lease, never from a shared envelope (CELL.md §8.2)")
+		return pendErr
+	}
+
+	overseers := map[string]bool{}
+	fmt.Println("leases")
+	for _, l := range leases {
+		mark := "  "
+		if l.CellID == me {
+			mark = "* "
+		}
+		fmt.Printf("%s%s\n", mark, l)
+		overseers[l.Overseer] = true
+	}
+	fmt.Printf("(* is this cell, %s)\n", me)
+
+	fmt.Println("\noutstanding exposure — the sum of lease headroom, which is what the")
+	fmt.Println("overseer can still be committed to without issuing anything further")
+	exposure := authority.Exposure(leases)
+	for _, capability := range sortedKeys(exposure) {
+		fmt.Printf("  %-28s %.4g\n", capability, exposure[capability])
+	}
+
+	for _, overseer := range sortedKeys(overseers) {
+		env, _, err := authority.LoadEnvelope(built.Varvig, overseer)
+		if err != nil {
+			// A lease naming an envelope this cell cannot read is worth saying
+			// out loud: the ceiling it is drawn from cannot be checked here.
+			fmt.Printf("\nenvelope %s: %v\n", overseer, err)
+			continue
+		}
+		fmt.Printf("\nenvelope %s (ceilings, shared across every cell under it)\n", overseer)
+		for _, c := range env.Ceilings {
+			fmt.Printf("  %-28s %.4g %s", c.Capability, c.Spend, c.Unit)
+			if c.Quantity > 0 {
+				fmt.Printf("  qty %d", c.Quantity)
+			}
+			if c.RatePerDay > 0 {
+				fmt.Printf("  max %d/day", c.RatePerDay)
+			}
+			fmt.Println()
+		}
+		var under []authority.Lease
+		for _, l := range leases {
+			if l.Overseer == overseer {
+				under = append(under, l)
+			}
+		}
+		if err := authority.CheckExclusive(env, under); err != nil {
+			// This is the invariant an operator most wants checked: leases that
+			// overlap or sum past the ceiling mean the exposure above is wrong.
+			fmt.Printf("  INVARIANT VIOLATED: %v\n", err)
+		} else {
+			fmt.Println("  leases are exclusive and within the ceiling")
+		}
+	}
+	return errors.Join(listErr, pendErr)
+}
+
+// sortedKeys keeps report output stable across runs, so two invocations with the
+// same state produce the same text and a diff means something changed.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func cmdGate(args []string) error {

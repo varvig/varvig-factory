@@ -39,6 +39,7 @@ import (
 	"time"
 
 	"github.com/varvig/varvig-factory/artifact"
+	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/budget"
 	"github.com/varvig/varvig-factory/cell"
 	"github.com/varvig/varvig-factory/claim"
@@ -92,8 +93,18 @@ type Cell struct {
 	// MaxAttemptsPerCell caps repeat attempts by this cell at one task.
 	MaxAttemptsPerCell int
 
+	// MaxTrustAge optionally bounds how old a successful sync may be and still
+	// count as current for promotion (§4.3b).
+	MaxTrustAge authority.MaxAge
+
 	Now func() time.Time
 	Log func(string)
+
+	// sync records what the last pass learned about the currency of trust
+	// state. It is deliberately not exported: it is an observation the loop
+	// makes, never a value a caller sets, and a settable one would let a
+	// misconfiguration assert freshness it has not established.
+	sync authority.Sync
 }
 
 // Report is what one pass did. Every field is a count or a list rather than a
@@ -313,6 +324,7 @@ func (c *Cell) Once(ctx context.Context) (Report, error) {
 		if err := c.V.Push(c.Upstream, c.branch()); err != nil {
 			if errors.Is(err, varvigcli.ErrUnreachable) {
 				rep.Offline = true
+				c.sync.Reachable = false
 			} else {
 				// A refused push is upstream having diverged. The local state is
 				// intact and immutable; the next pass will fetch and reconcile.
@@ -340,17 +352,27 @@ func (c *Cell) fetch() bool {
 	if c.Upstream == "" {
 		// No upstream configured is not offline: there is nothing to be
 		// disconnected from, and treating it as offline would apply the tighter
-		// offline budget to a single-cell deployment forever.
+		// offline budget to a single-cell deployment forever — and would make
+		// promotion impossible for the simplest working configuration (§4.3b).
+		c.sync = authority.Sync{Configured: false}
 		return false
 	}
 	if err := c.V.Fetch(c.Upstream, c.branch()); err != nil {
 		if errors.Is(err, varvigcli.ErrUnreachable) {
-			c.logf("upstream %s unreachable; continuing offline", c.Upstream)
+			// Keep the previous successful sync time: the cell is behind, not
+			// amnesiac, and how far behind is what a max-age bound reads.
+			c.sync.Configured, c.sync.Reachable = true, false
+			c.logf("upstream %s unreachable; continuing offline — the cell keeps proposing but will not promote (§4.3b)", c.Upstream)
 			return true
 		}
+		// A fetch that failed for some other reason also leaves trust state
+		// unconfirmed. Treating it as fresh because the error was unfamiliar
+		// would be the wrong way round.
+		c.sync.Configured, c.sync.Reachable = true, false
 		c.logf("fetch from %s failed: %v", c.Upstream, err)
 		return false
 	}
+	c.sync = authority.Sync{Configured: true, Reachable: true, At: c.now()}
 	return false
 }
 

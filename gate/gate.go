@@ -58,8 +58,9 @@ const (
 	// Promote: this attempt may be promoted, subject to every other §6.3
 	// condition — the gate is one constraint among several, never a bypass.
 	Promote
-	// Defer: a human decides. This is the safe answer and the default for
-	// anything the gate could not resolve.
+	// Defer: a higher principal decides — a human, or an overseer agent (§6.6).
+	// This is the safe answer and the default for anything the gate could not
+	// resolve.
 	Defer
 )
 
@@ -70,7 +71,7 @@ func (v Verdict) String() string {
 	case Refuse:
 		return "refuse"
 	default:
-		return "defer-to-human"
+		return "escalate"
 	}
 }
 
@@ -85,8 +86,8 @@ const (
 //
 // It is an error rather than a Defer verdict on purpose. Callers must decide
 // explicitly what an unconfigured gate means for them — for `gated` promotion it
-// is fine and expected, since a human decides anyway, while for `autonomous` it
-// is disqualifying. Returning Defer here would let both paths share one code
+// is fine and expected, since a higher principal decides anyway, while for
+// `autonomous` it is disqualifying. Returning Defer here would let both paths share one code
 // path that silently did the wrong thing in the second case.
 var ErrNoModule = errors.New("gate: no promotion-policy module is bound")
 

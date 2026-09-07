@@ -192,7 +192,7 @@ func TestOutcomeSummaryReportsEveryUnmetCondition(t *testing.T) {
 	out := Outcome{
 		Mode: ModeAutonomous,
 		Failed: []Failure{
-			{CondGateVerdict, "policy module returned defer-to-human"},
+			{CondGateVerdict, "policy module returned escalate"},
 			{CondIndependentEvidence, "no passing evidence from another cell"},
 			{CondAgreementMetric, "no metric for this scope"},
 		},
@@ -203,12 +203,12 @@ func TestOutcomeSummaryReportsEveryUnmetCondition(t *testing.T) {
 		t.Fatalf("failures are not in declared order: %+v", out.Failed)
 	}
 	s := out.Summary()
-	for _, want := range []string{"independent-evidence", "agreement-metric", "gate-verdict", "deferred-to-human"} {
+	for _, want := range []string{"independent-evidence", "agreement-metric", "gate-verdict", "escalated-to-higher-principal"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("summary is missing %q:\n%s", want, s)
 		}
 	}
-	if !out.DeferredToHuman() {
-		t.Fatal("an unpromoted outcome did not report as deferred to a human")
+	if !out.Escalated() {
+		t.Fatal("an unpromoted outcome did not report as escalated")
 	}
 }

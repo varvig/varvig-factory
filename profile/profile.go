@@ -24,6 +24,7 @@ import (
 
 	"github.com/varvig/varvig-factory/agreement"
 	"github.com/varvig/varvig-factory/artifact"
+	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/budget"
 	"github.com/varvig/varvig-factory/cell"
 	"github.com/varvig/varvig-factory/gate"
@@ -164,6 +165,10 @@ type PromotionConfig struct {
 	// Fingerprint is this cell's key fingerprint, matched against the trust
 	// store so a revoked allowed_keys line stops promotion immediately (§6.5).
 	Fingerprint string `json:"fingerprint,omitempty"`
+	// MaxTrustAge optionally bounds how old a successful sync may be and still
+	// count as current for promotion (§4.3b). Empty means reachability alone
+	// decides, which is what the spec asks for; set it to be stricter.
+	MaxTrustAge Duration `json:"max_trust_age,omitempty"`
 	// Baselines maps a path scope to the declared environment baseline for it
 	// (§6.3 condition 2).
 	Baselines map[string]cell.Environment `json:"baselines,omitempty"`
@@ -503,6 +508,7 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		Baselines:          c.Promotion.Baselines,
 		YieldToFreshClaims: c.YieldToFreshClaims,
 		MaxAttemptsPerCell: c.MaxAttemptsPerCell,
+		MaxTrustAge:        authority.MaxAge(c.Promotion.MaxTrustAge.D(0)),
 	}
 	cl.Promoter = &promote.Promoter{
 		V:           v,
@@ -512,6 +518,7 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		Reverify:    cl,
 		CellID:      c.CellID,
 		Fingerprint: c.Promotion.Fingerprint,
+		MaxTrustAge: authority.MaxAge(c.Promotion.MaxTrustAge.D(0)),
 	}
 	return Built{
 		Cell:     cl,

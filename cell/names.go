@@ -40,6 +40,20 @@ const (
 	NoteArtifact = "factory/artifact"
 	// NoteAgreement carries promotion-agreement observations (CELL.md §9).
 	NoteAgreement = "factory/agreement"
+
+	// EnvelopePrefix roots overseer envelopes: the per-capability ceilings an
+	// overseer may allocate from (CELL.md §11). Only the owner key may move one
+	// of these refs — that is the owner's one non-delegable act, and it is what
+	// makes "no agent can widen its own envelope" true by construction rather
+	// than by a check anyone could forget.
+	EnvelopePrefix = "refs/envelopes/"
+	// LeasePrefix roots per-cell, per-capability budget leases: exclusive
+	// allocations drawn from an envelope (CELL.md §11.2). Exclusive is why a
+	// stale lease is safe to spend.
+	LeasePrefix = "refs/leases/"
+	// ReservationPrefix roots reservations held against a lease while an
+	// effectful action is in flight (CELL.md §12.3).
+	ReservationPrefix = "refs/reservations/"
 )
 
 // ValidID reports whether s is a well-formed cell id: lowercase alphanumeric
@@ -183,6 +197,63 @@ func PinRef(cellID string, notAfter int64, objectHash string) (string, error) {
 		return "", fmt.Errorf("cell: pin target %q is not a varvig object hash in hex form", objectHash)
 	}
 	return fmt.Sprintf("%s%016x/%s", prefix, notAfter, objectHash), nil
+}
+
+// EnvelopeRef names an overseer's envelope.
+func EnvelopeRef(overseerID string) (string, error) {
+	if err := CheckID(overseerID); err != nil {
+		return "", err
+	}
+	return EnvelopePrefix + overseerID, nil
+}
+
+// LeaseRef names one cell's lease for one capability.
+//
+// The capability is hex-encoded because a capability id is an interface alias
+// like "pcb-fabrication@1" — it carries characters a ref name may not, and an
+// alias is chosen by whoever published the interface rather than by this cell.
+// Encoding keeps the ref name valid for every possible alias instead of only
+// the ones that happen to be safe.
+func LeaseRef(cellID, capability string) (string, error) {
+	if err := CheckID(cellID); err != nil {
+		return "", err
+	}
+	if capability == "" {
+		return "", fmt.Errorf("cell: lease ref needs a capability")
+	}
+	return LeasePrefix + cellID + "/" + hex.EncodeToString([]byte(capability)), nil
+}
+
+// ReservationRef names a reservation held by a cell against an idempotency key.
+//
+// The key is the identity: a retry after a network failure must find the same
+// reservation rather than make a second one, which is the whole reason
+// reservations are refs and not memory.
+func ReservationRef(cellID, idempotencyKey string) (string, error) {
+	if err := CheckID(cellID); err != nil {
+		return "", err
+	}
+	if !isHex(idempotencyKey) {
+		return "", fmt.Errorf("cell: reservation key %q is not a hex digest", idempotencyKey)
+	}
+	return ReservationPrefix + cellID + "/" + idempotencyKey, nil
+}
+
+// ParseLeaseRef decomposes a lease ref, decoding the capability.
+func ParseLeaseRef(ref string) (cellID, capability string, err error) {
+	rest, ok := strings.CutPrefix(ref, LeasePrefix)
+	if !ok {
+		return "", "", fmt.Errorf("cell: not a lease ref: %q", ref)
+	}
+	id, encoded, ok := strings.Cut(rest, "/")
+	if !ok || !ValidID(id) {
+		return "", "", fmt.Errorf("cell: malformed lease ref: %q", ref)
+	}
+	raw, derr := hex.DecodeString(encoded)
+	if derr != nil {
+		return "", "", fmt.Errorf("cell: malformed capability in lease ref %q", ref)
+	}
+	return id, string(raw), nil
 }
 
 // ParsePinRef decomposes one of this cell's pin refs.
