@@ -145,9 +145,18 @@ type Lease struct {
 	Unit     string  `json:"unit,omitempty"`
 	Quantity int64   `json:"quantity,omitempty"`
 	// Spent and Ordered are settled actuals, updated when the cell settles.
-	Spent    float64 `json:"spent,omitempty"`
-	Ordered  int64   `json:"ordered,omitempty"`
-	IssuedAt int64   `json:"issued_at"`
+	Spent   float64 `json:"spent,omitempty"`
+	Ordered int64   `json:"ordered,omitempty"`
+	// Reserved and ReservedUnits are headroom held by reservations that have not
+	// settled yet (§7.1). They are what stops two pending orders from each
+	// passing the headroom check on their own and together exceeding the lease.
+	//
+	// Held is not the same as spent: a hold is released if the action is
+	// definitely rejected, or if the reservation expires without an answer. Only
+	// settlement converts a hold into spend.
+	Reserved      float64 `json:"reserved,omitempty"`
+	ReservedUnits int64   `json:"reserved_units,omitempty"`
+	IssuedAt      int64   `json:"issued_at"`
 	// ReclaimAfter is the stated timeout after which an unspent lease may be
 	// *provisionally* reclaimed (§6.6, stranded leases). It is not an expiry:
 	// the lease stays spendable by its holder past this point, because a cell
@@ -167,7 +176,7 @@ func (l Lease) Validate() error {
 	if err := cell.CheckID(l.Overseer); err != nil {
 		return fmt.Errorf("authority: lease for %s: overseer: %w", l.CellID, err)
 	}
-	if l.Amount < 0 || l.Quantity < 0 || l.Spent < 0 || l.Ordered < 0 {
+	if l.Amount < 0 || l.Quantity < 0 || l.Spent < 0 || l.Ordered < 0 || l.Reserved < 0 || l.ReservedUnits < 0 {
 		return fmt.Errorf("authority: lease for %s/%s has a negative amount", l.CellID, l.Capability)
 	}
 	if l.Amount > 0 && l.Unit == "" {
@@ -181,15 +190,31 @@ func (l Lease) Validate() error {
 	if l.Ordered > l.Quantity && l.Quantity > 0 {
 		return fmt.Errorf("authority: lease for %s/%s has ordered %d of %d", l.CellID, l.Capability, l.Ordered, l.Quantity)
 	}
+	if l.Spent+l.Reserved > l.Amount && l.Amount > 0 {
+		// Over-commitment: settled spend plus held headroom exceeds the lease.
+		// It means a hold was taken without checking, or a settlement recorded
+		// an actual larger than its hold without the hold being adjusted.
+		return fmt.Errorf("authority: lease for %s/%s has committed %g of %g (%g spent, %g held by reservations)",
+			l.CellID, l.Capability, l.Spent+l.Reserved, l.Amount, l.Spent, l.Reserved)
+	}
+	if l.Quantity > 0 && l.Ordered+l.ReservedUnits > l.Quantity {
+		return fmt.Errorf("authority: lease for %s/%s has committed %d of %d units (%d ordered, %d held)",
+			l.CellID, l.Capability, l.Ordered+l.ReservedUnits, l.Quantity, l.Ordered, l.ReservedUnits)
+	}
 	return nil
 }
 
-// Headroom is what remains spendable on this lease.
+// Headroom is what remains spendable on this lease: the allocation less what has
+// settled and less what pending reservations are holding.
+//
+// Held headroom is subtracted because a pending reservation may already have
+// become a real order at the far end. Treating it as still available is exactly
+// the double-spend the reservation exists to prevent.
 func (l Lease) Headroom() float64 {
-	if l.Spent >= l.Amount {
-		return 0
+	if committed := l.Spent + l.Reserved; committed < l.Amount {
+		return l.Amount - committed
 	}
-	return l.Amount - l.Spent
+	return 0
 }
 
 // QuantityHeadroom is the remaining unit count, or -1 when no quantity ceiling
@@ -199,10 +224,10 @@ func (l Lease) QuantityHeadroom() int64 {
 	if l.Quantity <= 0 {
 		return -1
 	}
-	if l.Ordered >= l.Quantity {
-		return 0
+	if committed := l.Ordered + l.ReservedUnits; committed < l.Quantity {
+		return l.Quantity - committed
 	}
-	return l.Quantity - l.Ordered
+	return 0
 }
 
 // Reclaimable reports whether an unspent lease has passed its stated timeout.
@@ -212,7 +237,10 @@ func (l Lease) QuantityHeadroom() int64 {
 // not yet reported. So this answers "may an overseer begin reclaiming?", never
 // "is this lease void?".
 func (l Lease) Reclaimable(now time.Time) bool {
-	return l.ReclaimAfter > 0 && now.Unix() > l.ReclaimAfter && l.Spent == 0
+	// Held headroom counts against reclaim for the same reason spend does, and
+	// more sharply: a hold means an action may be in flight right now.
+	return l.ReclaimAfter > 0 && now.Unix() > l.ReclaimAfter &&
+		l.Spent == 0 && l.Ordered == 0 && l.Reserved == 0 && l.ReservedUnits == 0
 }
 
 // Exhausted reports whether the lease has nothing left to spend.
@@ -314,4 +342,72 @@ func (l Lease) String() string {
 		b.WriteString(" (exhausted)")
 	}
 	return b.String()
+}
+
+// Hold reserves headroom on a lease ahead of an effectful action, returning the
+// updated lease. It refuses when the hold would exceed what is left.
+//
+// Holding before acting is what makes two pending actions safe. Without it each
+// would check the same headroom, pass, and together exceed the lease — and by
+// the time the second invoice arrives the money is gone.
+func (l Lease) Hold(amount float64, quantity int64) (Lease, error) {
+	if amount < 0 || quantity < 0 {
+		return l, fmt.Errorf("authority: cannot hold a negative amount on %s/%s", l.CellID, l.Capability)
+	}
+	if amount > 0 && amount > l.Headroom() {
+		return l, fmt.Errorf("authority: holding %g %s on the lease for %s/%s leaves %g; only %g is available",
+			amount, l.Unit, l.CellID, l.Capability, l.Headroom()-amount, l.Headroom())
+	}
+	if quantity > 0 {
+		if headroom := l.QuantityHeadroom(); headroom >= 0 && quantity > headroom {
+			return l, fmt.Errorf("authority: holding %d units on the lease for %s/%s leaves only %d",
+				quantity, l.CellID, l.Capability, headroom)
+		}
+	}
+	l.Reserved += amount
+	l.ReservedUnits += quantity
+	return l, nil
+}
+
+// Release returns held headroom to the lease without spending it. It is what a
+// confirmed rejection and an expired reservation both do.
+//
+// Releasing more than is held is refused rather than clamped: it means two
+// releases for one hold, and silently flooring at zero would hand back headroom
+// that a still-pending action might yet consume.
+func (l Lease) Release(amount float64, quantity int64) (Lease, error) {
+	if amount < 0 || quantity < 0 {
+		return l, fmt.Errorf("authority: cannot release a negative amount on %s/%s", l.CellID, l.Capability)
+	}
+	if amount > l.Reserved || quantity > l.ReservedUnits {
+		return l, fmt.Errorf("authority: releasing %g %s and %d units on %s/%s, which holds only %g and %d; this is a double release",
+			amount, l.Unit, quantity, l.CellID, l.Capability, l.Reserved, l.ReservedUnits)
+	}
+	l.Reserved -= amount
+	l.ReservedUnits -= quantity
+	return l, nil
+}
+
+// Convert turns a hold into settled spend, using the actual amount rather than
+// the held one.
+//
+// The two differ whenever a quote was not exact, which is normal. An actual
+// above the hold is still applied — the money is already gone, and refusing to
+// record it would leave the lease claiming headroom that no longer exists — but
+// it is reported, because a quote that is persistently wrong in one direction is
+// a signal worth surfacing rather than absorbing (§7.1).
+func (l Lease) Convert(held, actual float64, heldUnits, actualUnits int64) (Lease, error) {
+	released, err := l.Release(held, heldUnits)
+	if err != nil {
+		return l, err
+	}
+	if actual < 0 || actualUnits < 0 {
+		return l, fmt.Errorf("authority: cannot settle a negative amount on %s/%s", l.CellID, l.Capability)
+	}
+	released.Spent += actual
+	released.Ordered += actualUnits
+	if err := released.Validate(); err != nil {
+		return l, fmt.Errorf("settling %g %s against a hold of %g: %w", actual, l.Unit, held, err)
+	}
+	return released, nil
 }

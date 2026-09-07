@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/cell"
 	"github.com/varvig/varvig-factory/varvigcli"
 )
@@ -23,6 +24,18 @@ import (
 // that matters: the cell does not know whether the order was placed. That case
 // escalates. It is not retried, and the reservation is not deleted to clear the
 // way — deleting it is precisely how the second invoice arrives.
+//
+// A reservation also *holds lease headroom* for as long as it is outstanding
+// (§7.1). Without that, two pending actions would each check the same headroom,
+// each pass, and together exceed the lease. The hold is taken **before** the key
+// is claimed, and released if the claim then fails: leaking headroom is
+// recoverable — an expiry returns it — and a double-spend is not, so the order
+// of those two writes is chosen to fail in the recoverable direction.
+//
+// Expiry releases the held headroom but **never the key** (§9.14). A lost
+// external response must not permanently consume budget; it also must not let
+// the same action be submitted again, because it may well have happened. Those
+// are two different resources and they are released on two different rules.
 
 // State is a reservation's lifecycle.
 type State string
@@ -62,6 +75,16 @@ type Reservation struct {
 	AuthorizedBy string `json:"authorized_by"`
 
 	State State `json:"state"`
+	// ExpiresAt is when the *hold* lapses, releasing lease headroom. It is not
+	// when the reservation lapses: the key stays claimed for good, because an
+	// action whose outcome was never learned may have happened.
+	ExpiresAt int64 `json:"expires_at,omitempty"`
+	// HoldReleased records that the lease headroom for this reservation is no
+	// longer held — because it settled, was rejected, or expired. It is tracked
+	// on the reservation so a release cannot be applied twice to the lease.
+	HoldReleased bool `json:"hold_released,omitempty"`
+	// Actual is the settled cost when it differed from the quoted Amount.
+	Actual float64 `json:"actual,omitempty"`
 	// ExternalRef is the external system's own identifier — the order number,
 	// the contract id. It is what makes a pending reservation resolvable by a
 	// human or an overseer agent looking the action up at the far end.
@@ -83,6 +106,11 @@ func (r Reservation) String() string {
 	if r.ExternalRef != "" {
 		s += " ref=" + r.ExternalRef
 	}
+	if r.State == StatePending && r.HoldReleased {
+		// Worth surfacing: the money came back but the outcome is still unknown,
+		// which is a different situation from a hold that is still standing.
+		s += " (hold released, outcome still unknown)"
+	}
 	return s
 }
 
@@ -93,7 +121,21 @@ func (r Reservation) String() string {
 // readings forbid executing now.
 var ErrAlreadyReserved = errors.New("effect: this action is already reserved")
 
-// Reserve claims a request's idempotency key before the effect is attempted.
+// Claim is a successful reservation: the key, and the lease the hold was taken
+// on, each with the object hash it lives at so the caller can settle without
+// re-reading.
+//
+// The two hashes are carried together because the two writes are a pair. A
+// caller holding only one of them cannot finish the job.
+type Claim struct {
+	Reservation Reservation
+	Hash        string
+	Lease       authority.Lease
+	LeaseHash   string
+}
+
+// Reserve claims a request's idempotency key and holds the lease headroom for
+// it, before the effect is attempted.
 //
 // On success the caller — and only the caller — may execute, then must call
 // Settle or Fail. If the key is already claimed, Reserve returns the existing
@@ -103,63 +145,130 @@ var ErrAlreadyReserved = errors.New("effect: this action is already reserved")
 // winner and one ErrAlreadyReserved rather than two orders. That is varvig's
 // ordinary ref CAS doing the work; nothing here needs a lock or a lease of its
 // own.
-func Reserve(v varvigcli.Varvig, req Request, executingCell string, at int64) (Reservation, string, error) {
+//
+// ttl is how long the hold lasts. Zero means no expiry, which is legitimate for
+// a capability that always answers synchronously — but for anything asynchronous
+// it means a lost response consumes the headroom for good, so set one.
+func Reserve(v varvigcli.Varvig, req Request, executingCell string, lease authority.Lease, leaseHash string, at, ttl int64) (Claim, error) {
 	key, err := IdempotencyKey(req.Task, req.Capability, req.Payload)
 	if err != nil {
-		return Reservation{}, "", err
+		return Claim{}, err
 	}
 	name, err := cell.ReservationRef(executingCell, key)
 	if err != nil {
-		return Reservation{}, "", err
+		return Claim{}, err
+	}
+	if lease.CellID != executingCell {
+		return Claim{}, fmt.Errorf("effect: %s cannot reserve against a lease held by %q; spend comes from the acting cell's own lease",
+			executingCell, lease.CellID)
+	}
+	if lease.Capability != req.Capability.ID {
+		return Claim{}, fmt.Errorf("effect: the lease is for %s but this action is %s", lease.Capability, req.Capability.ID)
 	}
 
 	// Look first, so the common "already done" case reports what happened rather
-	// than only that the swap was refused.
+	// than only that a swap was refused — and so an existing claim's hold is not
+	// taken a second time.
 	if existing, hash, err := loadReservation(v, name); err == nil {
-		return existing, hash, fmt.Errorf("%w: %s", ErrAlreadyReserved, existing)
+		return Claim{Reservation: existing, Hash: hash, Lease: lease, LeaseHash: leaseHash},
+			fmt.Errorf("%w: %s", ErrAlreadyReserved, existing)
 	} else if !errors.Is(err, varvigcli.ErrNoRef) {
-		return Reservation{}, "", err
+		return Claim{}, err
 	}
 
+	// Hold the headroom first. If the key claim below then fails, the hold is
+	// released; if *that* release fails, headroom leaks until the expiry returns
+	// it. Leaking headroom is recoverable and a double-spend is not, so the
+	// writes go in this order.
+	held, err := lease.Hold(req.Amount, req.Quantity)
+	if err != nil {
+		return Claim{}, err
+	}
+	heldHash, err := authority.PublishLease(v, held, leaseHash)
+	if err != nil {
+		return Claim{}, err
+	}
+
+	var expires int64
+	if ttl > 0 {
+		expires = at + ttl
+	}
 	r := Reservation{
 		Key: key, CellID: executingCell, Task: req.Task,
 		Capability: req.Capability.ID, Interface: req.Capability.Interface,
 		Amount: req.Amount, Unit: req.Unit, Quantity: req.Quantity,
 		AuthorizedBy: req.AuthorizedBy,
-		State:        StatePending, ReservedAt: at,
+		State:        StatePending, ReservedAt: at, ExpiresAt: expires,
 	}
 	hash, err := writeReservation(v, name, r, "")
 	if err != nil {
-		if errors.Is(err, varvigcli.ErrCAS) {
-			// Somebody claimed it between the read and the write. Re-read, so
-			// the caller is told what the winner is doing rather than being
-			// handed a bare CAS failure.
-			if existing, ehash, lerr := loadReservation(v, name); lerr == nil {
-				return existing, ehash, fmt.Errorf("%w: %s", ErrAlreadyReserved, existing)
+		// The key was claimed between the read and the write. Give the hold
+		// back, because the winner has taken its own.
+		if back, rerr := held.Release(req.Amount, req.Quantity); rerr == nil {
+			if backHash, perr := authority.PublishLease(v, back, heldHash); perr == nil {
+				held, heldHash = back, backHash
 			}
-			return Reservation{}, "", fmt.Errorf("%w: %v", ErrAlreadyReserved, err)
 		}
-		return Reservation{}, "", err
+		if errors.Is(err, varvigcli.ErrCAS) {
+			// Re-read, so the caller is told what the winner is doing rather
+			// than being handed a bare CAS failure.
+			if existing, ehash, lerr := loadReservation(v, name); lerr == nil {
+				return Claim{Reservation: existing, Hash: ehash, Lease: held, LeaseHash: heldHash},
+					fmt.Errorf("%w: %s", ErrAlreadyReserved, existing)
+			}
+			return Claim{Lease: held, LeaseHash: heldHash}, fmt.Errorf("%w: %v", ErrAlreadyReserved, err)
+		}
+		return Claim{Lease: held, LeaseHash: heldHash}, err
 	}
-	return r, hash, nil
+	return Claim{Reservation: r, Hash: hash, Lease: held, LeaseHash: heldHash}, nil
 }
 
-// Settle records that the external effect happened, with the far end's own
-// identifier for it.
+// Settle records that the external effect happened, converts the hold into
+// settled spend, and writes both refs.
 //
 // externalRef is required. A settled reservation with nothing to look up is
 // almost as bad as no reservation at all: the next question about this spend is
 // "which order was it", and the answer has to be in the record.
-func Settle(v varvigcli.Varvig, r Reservation, hash, externalRef string, at int64) (string, error) {
+//
+// actual is what it really cost. Pass 0 to mean "as quoted". A divergence from
+// the quote is recorded rather than absorbed (§7.1): one is noise, a pattern of
+// them is a capability whose quotes cannot be trusted.
+func Settle(v varvigcli.Varvig, c Claim, externalRef string, actual float64, at int64) (Claim, error) {
 	if externalRef == "" {
-		return "", fmt.Errorf("effect: settling %s needs the external reference; a spend nobody can look up is not a settled one", short(r.Key))
+		return c, fmt.Errorf("effect: settling %s needs the external reference; a spend nobody can look up is not a settled one", short(c.Reservation.Key))
 	}
-	r.State, r.ExternalRef, r.SettledAt = StateDone, externalRef, at
-	return update(v, r, hash)
+	if c.Reservation.HoldReleased {
+		return c, fmt.Errorf("effect: the hold for %s is already released; settling again would spend the lease twice", short(c.Reservation.Key))
+	}
+	if actual == 0 {
+		actual = c.Reservation.Amount
+	}
+	lease, err := c.Lease.Convert(c.Reservation.Amount, actual, c.Reservation.Quantity, c.Reservation.Quantity)
+	if err != nil {
+		return c, err
+	}
+	leaseHash, err := authority.PublishLease(v, lease, c.LeaseHash)
+	if err != nil {
+		return c, err
+	}
+	c.Lease, c.LeaseHash = lease, leaseHash
+
+	r := c.Reservation
+	r.State, r.ExternalRef, r.SettledAt, r.HoldReleased = StateDone, externalRef, at, true
+	if actual != r.Amount {
+		r.Actual = actual
+		r.Detail = fmt.Sprintf("quoted %g %s, actual %g %s", r.Amount, r.Unit, actual, r.Unit)
+	}
+	hash, err := update(v, r, c.Hash)
+	if err != nil {
+		return c, err
+	}
+	c.Reservation, c.Hash = r, hash
+	return c, nil
 }
 
 // Fail records that the external service definitely rejected the action, so no
-// effect occurred.
+// effect occurred, and releases the hold.
 //
 // **A timeout is not a failure.** Only a definite rejection may be recorded
 // here; anything else leaves the reservation pending, because "we never heard
@@ -167,12 +276,29 @@ func Settle(v varvigcli.Varvig, r Reservation, hash, externalRef string, at int6
 // safe to act on. The reservation is not deleted either way: the key stays
 // claimed, and whether to authorize a fresh attempt is a decision for a higher
 // principal.
-func Fail(v varvigcli.Varvig, r Reservation, hash, reason string, at int64) (string, error) {
+func Fail(v varvigcli.Varvig, c Claim, reason string, at int64) (Claim, error) {
 	if reason == "" {
-		return "", errors.New("effect: recording a failure needs the rejection it is based on; without one this is a timeout, which stays pending")
+		return c, errors.New("effect: recording a failure needs the rejection it is based on; without one this is a timeout, which stays pending")
 	}
+	r := c.Reservation
 	r.State, r.Detail, r.SettledAt = StateFailed, reason, at
-	return update(v, r, hash)
+	if !r.HoldReleased {
+		lease, err := c.Lease.Release(r.Amount, r.Quantity)
+		if err != nil {
+			return c, err
+		}
+		leaseHash, err := authority.PublishLease(v, lease, c.LeaseHash)
+		if err != nil {
+			return c, err
+		}
+		c.Lease, c.LeaseHash, r.HoldReleased = lease, leaseHash, true
+	}
+	hash, err := update(v, r, c.Hash)
+	if err != nil {
+		return c, err
+	}
+	c.Reservation, c.Hash = r, hash
+	return c, nil
 }
 
 // Resolve records how a higher principal settled a pending reservation after
@@ -181,20 +307,115 @@ func Fail(v varvigcli.Varvig, r Reservation, hash, reason string, at int64) (str
 // This is the exit from the one state a cell cannot resolve alone. It is a
 // distinct call from Settle and Fail so the record says a principal decided it,
 // which is the difference between a confirmed outcome and an assumed one.
-func Resolve(v varvigcli.Varvig, r Reservation, hash string, happened bool, principal, detail string, at int64) (string, error) {
+func Resolve(v varvigcli.Varvig, c Claim, happened bool, principal, detail string, at int64) (Claim, error) {
+	r := c.Reservation
 	if principal == "" {
-		return "", errors.New("effect: resolving a pending reservation needs the principal who checked; a cell cannot resolve its own unknown state")
+		return c, errors.New("effect: resolving a pending reservation needs the principal who checked; a cell cannot resolve its own unknown state")
 	}
 	if principal == r.CellID {
-		return "", fmt.Errorf("%w: %s cannot resolve its own pending reservation", ErrSelfAuthorization, r.CellID)
+		return c, fmt.Errorf("%w: %s cannot resolve its own pending reservation", ErrSelfAuthorization, r.CellID)
 	}
-	r.State = StateFailed
 	if happened {
-		r.State = StateDone
+		// It happened: the lease owes the money. If the hold was already
+		// released by an expiry, the spend is applied without a hold to convert
+		// — which is exactly the case expiry-without-release-of-the-key exists
+		// to keep survivable.
+		lease := c.Lease
+		var err error
+		if r.HoldReleased {
+			lease.Spent += r.Amount
+			lease.Ordered += r.Quantity
+			err = lease.Validate()
+		} else {
+			lease, err = c.Lease.Convert(r.Amount, r.Amount, r.Quantity, r.Quantity)
+		}
+		if err != nil {
+			return c, err
+		}
+		leaseHash, err := authority.PublishLease(v, lease, c.LeaseHash)
+		if err != nil {
+			return c, err
+		}
+		c.Lease, c.LeaseHash = lease, leaseHash
+		r.State, r.HoldReleased = StateDone, true
+	} else {
+		if !r.HoldReleased {
+			lease, err := c.Lease.Release(r.Amount, r.Quantity)
+			if err != nil {
+				return c, err
+			}
+			leaseHash, err := authority.PublishLease(v, lease, c.LeaseHash)
+			if err != nil {
+				return c, err
+			}
+			c.Lease, c.LeaseHash, r.HoldReleased = lease, leaseHash, true
+		}
+		r.State = StateFailed
 	}
 	r.Detail = fmt.Sprintf("resolved by %s: %s", principal, detail)
 	r.SettledAt = at
-	return update(v, r, hash)
+	hash, err := update(v, r, c.Hash)
+	if err != nil {
+		return c, err
+	}
+	c.Reservation, c.Hash = r, hash
+	return c, nil
+}
+
+// Expired reports whether this reservation's hold has lapsed.
+func (r Reservation) Expired(now int64) bool {
+	return r.ExpiresAt > 0 && now > r.ExpiresAt && !r.HoldReleased
+}
+
+// ReleaseExpired returns the lease headroom held by expired reservations, so a
+// lost external response cannot permanently consume budget (§9.14).
+//
+// It releases the **headroom only**. The reservation stays pending and the key
+// stays claimed for good: the action may have happened, and letting the key go
+// would let the same order be placed again. Two different resources, two
+// different rules — money comes back on a timer, the right to act does not come
+// back at all.
+//
+// Returns the updated lease and the reservations whose holds were released, so
+// the caller can report them: each one is still an action of unknown outcome.
+func ReleaseExpired(v varvigcli.Varvig, lease authority.Lease, leaseHash string, now int64) (authority.Lease, string, []Reservation, error) {
+	pending, err := Pending(v, lease.CellID)
+	if err != nil {
+		return lease, leaseHash, nil, err
+	}
+	var released []Reservation
+	for _, r := range pending {
+		if r.Capability != lease.Capability || !r.Expired(now) {
+			continue
+		}
+		next, err := lease.Release(r.Amount, r.Quantity)
+		if err != nil {
+			return lease, leaseHash, released, err
+		}
+		nextHash, err := authority.PublishLease(v, next, leaseHash)
+		if err != nil {
+			return lease, leaseHash, released, err
+		}
+		lease, leaseHash = next, nextHash
+
+		name, err := cell.ReservationRef(r.CellID, r.Key)
+		if err != nil {
+			return lease, leaseHash, released, err
+		}
+		current, err := v.ResolveRef(name)
+		if err != nil {
+			return lease, leaseHash, released, err
+		}
+		r.HoldReleased = true
+		r.Detail = fmt.Sprintf("hold released at %d without an answer; the key stays claimed because the action may have happened", now)
+		if _, err := writeReservation(v, name, r, current); err != nil {
+			// The lease is already correct, which is the part that matters; the
+			// caller re-runs to finish marking the record.
+			return lease, leaseHash, released, err
+		}
+		released = append(released, r)
+	}
+	return lease, leaseHash, released, nil
 }
 
 // Pending lists a cell's unresolved reservations.
@@ -232,6 +453,27 @@ func Pending(v varvigcli.Varvig, cellID string) ([]Reservation, error) {
 		return out, fmt.Errorf("effect: %d unreadable reservation refs, each an action of unknown outcome: %v", len(bad), bad)
 	}
 	return out, nil
+}
+
+// LoadClaim rebuilds a Claim for a reservation a principal is about to resolve.
+//
+// Pending reports *what* is unresolved; this fetches the handles needed to act
+// on one. They are separate calls because listing happens once and resolving
+// happens per reservation, each against a lease that may have moved in between.
+func LoadClaim(v varvigcli.Varvig, cellID, key string, lease authority.Lease, leaseHash string) (Claim, error) {
+	name, err := cell.ReservationRef(cellID, key)
+	if err != nil {
+		return Claim{}, err
+	}
+	r, hash, err := loadReservation(v, name)
+	if err != nil {
+		return Claim{}, err
+	}
+	if r.Capability != lease.Capability || r.CellID != lease.CellID {
+		return Claim{}, fmt.Errorf("effect: reservation %s is %s/%s but the lease given is %s/%s",
+			short(key), r.CellID, r.Capability, lease.CellID, lease.Capability)
+	}
+	return Claim{Reservation: r, Hash: hash, Lease: lease, LeaseHash: leaseHash}, nil
 }
 
 func update(v varvigcli.Varvig, r Reservation, hash string) (string, error) {

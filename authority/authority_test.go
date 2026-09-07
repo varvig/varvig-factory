@@ -279,3 +279,121 @@ func TestActNames(t *testing.T) {
 		t.Fatal("act names are not stable")
 	}
 }
+
+func TestHoldsAreCountedAgainstHeadroom(t *testing.T) {
+	// §7.1: a reservation holds headroom before the action is taken. Without
+	// that, two pending actions each check the same headroom and pass.
+	l := lease("mini-a", "pcb-fabrication@1", 1000)
+	l.Quantity = 20
+
+	held, err := l.Hold(700, 5)
+	if err != nil {
+		t.Fatalf("holding 700 of 1000: %v", err)
+	}
+	if held.Headroom() != 300 || held.QuantityHeadroom() != 15 {
+		t.Fatalf("after a hold: headroom=%g units=%d, want 300 and 15", held.Headroom(), held.QuantityHeadroom())
+	}
+	// Held is not spent. The distinction matters because a hold can come back
+	// and a spend cannot.
+	if held.Spent != 0 {
+		t.Fatalf("a hold was recorded as spend: %g", held.Spent)
+	}
+	if _, err := held.Hold(400, 0); err == nil {
+		t.Fatal("a second hold exceeded the lease")
+	}
+	if _, err := held.Hold(0, 16); err == nil {
+		t.Fatal("a second hold exceeded the unit ceiling")
+	}
+	if _, err := held.Hold(-1, 0); err == nil {
+		t.Fatal("a negative hold was accepted")
+	}
+
+	// A lease over-committed by holds is invalid, not merely tight: it means a
+	// hold was taken without a check.
+	bogus := l
+	bogus.Spent, bogus.Reserved = 600, 600
+	err = bogus.Validate()
+	if err == nil {
+		t.Fatal("a lease committing 1200 of 1000 validated")
+	}
+	if !strings.Contains(err.Error(), "held by reservations") {
+		t.Fatalf("the refusal does not distinguish held from spent: %v", err)
+	}
+}
+
+func TestReleaseAndConvert(t *testing.T) {
+	l := lease("mini-a", "pcb-fabrication@1", 1000)
+	l.Quantity = 20
+	held, err := l.Hold(320, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Release: a confirmed rejection, or an expiry. The money comes back and
+	// nothing was spent.
+	back, err := held.Release(320, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if back.Headroom() != 1000 || back.Spent != 0 {
+		t.Fatalf("release left headroom=%g spent=%g", back.Headroom(), back.Spent)
+	}
+	// Releasing twice is refused rather than clamped at zero: clamping would
+	// hand back headroom that a still-pending action might yet consume.
+	if _, err := back.Release(320, 0); err == nil {
+		t.Fatal("a double release was accepted")
+	}
+
+	// Convert: settlement. The hold becomes spend, at the *actual* price.
+	settled, err := held.Convert(320, 355.40, 5, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settled.Spent != 355.40 || settled.Reserved != 0 || settled.Ordered != 5 {
+		t.Fatalf("settlement left %+v", settled)
+	}
+	if settled.Headroom() != 1000-355.40 {
+		t.Fatalf("headroom = %g", settled.Headroom())
+	}
+	// An actual beyond the whole lease cannot be recorded: the lease would be in
+	// a state it calls invalid.
+	small := lease("mini-a", "pcb-fabrication@1", 400)
+	smallHeld, err := small.Hold(320, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := smallHeld.Convert(320, 900, 0, 0); err == nil {
+		t.Fatal("an actual beyond the lease was recorded")
+	}
+}
+
+func TestAHeldLeaseIsNotReclaimable(t *testing.T) {
+	// A hold means an action may be in flight right now, which is a sharper
+	// reason not to reclaim than settled spend is.
+	l := lease("mini-a", "pcb-fabrication@1", 1000)
+	l.ReclaimAfter = now.Unix()
+	held, err := l.Hold(320, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.Reclaimable(now.Add(48 * time.Hour)) {
+		t.Fatal("a lease with an outstanding hold was reclaimable")
+	}
+	if !l.Reclaimable(now.Add(48 * time.Hour)) {
+		t.Fatal("an untouched, timed-out lease was not reclaimable")
+	}
+}
+
+func TestExposureExcludesHeldHeadroom(t *testing.T) {
+	// Held amounts are already committed — they may be real orders at the far
+	// end. Reporting them as still-allocatable exposure would understate the
+	// commitment and overstate what is left.
+	l := lease("mini-a", "pcb-fabrication@1", 1000)
+	held, err := l.Hold(400, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := Exposure([]Lease{held})["pcb-fabrication@1"]; got != 600 {
+		t.Fatalf("exposure = %g, want 600", got)
+	}
+}

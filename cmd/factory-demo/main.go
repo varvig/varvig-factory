@@ -361,34 +361,40 @@ func run() error {
 	again := effect.Check(retry, "mini-a", &lease, disconnected.Sync, func() time.Time { return clock }, 0)
 	fmt.Printf("  the retry after a lost response derives the same key: %v\n", again.Key == dec.Key)
 
-	// Settlement: the spend is recorded against the lease ref, CAS'd against the
-	// value the cell read. Two settlements racing means one of them re-reads
-	// rather than one of them silently winning — the same mechanism as every
-	// other ref in the system.
-	held, readAt := must2(authority.LoadLease(mini.v, "mini-a", "pcb-fabrication@1"))
-	held.Spent, held.Ordered = 320, 5
-	must1(authority.PublishLease(mini.v, held, readAt))
-	fmt.Printf("  settled: %g of %g EUR spent, %g left\n", held.Spent, held.Amount, held.Headroom())
+	// Reserve, execute, settle. The key is claimed in a ref before the effect is
+	// attempted, create-only — and the same write holds the lease headroom, so a
+	// second pending order cannot pass the same headroom check.
+	current, readAt := must2(authority.LoadLease(mini.v, "mini-a", "pcb-fabrication@1"))
+	claim := must1(effect.Reserve(mini.v, order, "mini-a", current, readAt, clock.Unix(), 3600))
+	fmt.Printf("  reserved: %s\n", claim.Reservation)
+	fmt.Printf("  the lease now holds %g EUR against it, leaving %g of %g\n",
+		claim.Lease.Reserved, claim.Lease.Headroom(), claim.Lease.Amount)
 
-	// The same settlement replayed from the stale hash is refused, which is what
-	// stops two settlements from losing one of the amounts.
-	_, replay := authority.PublishLease(mini.v, held, readAt)
-	fmt.Printf("  replaying the settlement from the value already superseded: %v\n", replay != nil)
+	// A second order that fits the allocation but not the remaining headroom is
+	// refused while the first is still outstanding. Counting only settled spend
+	// would wave it through and the two together would exceed the lease.
+	competing := order
+	competing.Task, competing.Amount = ticket+"-b", 800
+	_, tooMuch := effect.Reserve(mini.v, competing, "mini-a", claim.Lease, claim.LeaseHash, clock.Unix()+1, 3600)
+	fmt.Printf("  a second 800 EUR order while the first is pending: %v\n", tooMuch != nil)
+
+	// The order goes through, and settlement converts the hold into spend at the
+	// price actually charged rather than the one quoted.
+	claim = must1(effect.Settle(mini.v, claim, "PO-90210", 355.40, clock.Add(time.Minute).Unix()))
+	fmt.Printf("  settled: %g EUR spent of %g, %g left (%s)\n",
+		claim.Lease.Spent, claim.Lease.Amount, claim.Lease.Headroom(), claim.Reservation.Detail)
+
+	// The same action again is refused by varvig's ordinary ref CAS, and told
+	// what happened rather than placing a second order.
+	_, repeat := effect.Reserve(mini.v, retry, "mini-a", claim.Lease, claim.LeaseHash, clock.Add(time.Hour).Unix(), 3600)
+	fmt.Printf("  the same action reserved again: %v\n", repeat)
 
 	// Exposure is what the overseer reasons about, and it is the sum of lease
-	// *headroom*: what is already spent is gone, not exposure.
+	// *headroom*: what is spent is gone, and what is held may already be an order
+	// at the far end. Neither is still allocatable.
 	fmt.Printf("  outstanding exposure for pcb-fabrication@1: %g EUR\n",
 		authority.Exposure(must1(authority.Leases(mini.v, "")))["pcb-fabrication@1"])
-	lease = held
-
-	// Reserve, execute, settle. The key is claimed in a ref before the effect is
-	// attempted, create-only, so the repeat below is refused by varvig's ordinary
-	// ref CAS and told what happened rather than placing a second order.
-	res, resHash := must2(effect.Reserve(mini.v, order, "mini-a", clock.Unix()))
-	fmt.Printf("  reserved: %s\n", res)
-	must1(effect.Settle(mini.v, res, resHash, "PO-90210", clock.Add(time.Minute).Unix()))
-	_, _, repeat := effect.Reserve(mini.v, retry, "mini-a", clock.Add(time.Hour).Unix())
-	fmt.Printf("  the same action reserved again: %v\n", repeat)
+	lease = claim.Lease
 
 	// Beyond the lease escalates rather than drawing on the 5000 EUR envelope.
 	// A lease that can be exceeded is advisory, and an advisory exclusive
@@ -396,7 +402,7 @@ func run() error {
 	tooBig := order
 	tooBig.Amount, tooBig.Quantity = 900, 12
 	beyond := effect.Check(tooBig, "mini-a", &lease, disconnected.Sync, func() time.Time { return clock }, 0)
-	fmt.Printf("  a 900 EUR order with 680 EUR left: allowed=%v escalate=%v\n", beyond.Allowed, beyond.Escalate)
+	fmt.Printf("  a 900 EUR order with %g EUR left: allowed=%v escalate=%v\n", lease.Headroom(), beyond.Allowed, beyond.Escalate)
 	fmt.Println(indent(beyond.Error()))
 
 	// And the cell cannot authorize its own order, holding a promote key or not.

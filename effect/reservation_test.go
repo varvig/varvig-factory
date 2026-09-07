@@ -8,69 +8,257 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/varvig/varvig-factory/cell"
+	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/varvigcli"
 )
+
+// leased sets up a repository with an envelope and one lease for mini-a, and
+// returns the lease with the hash it lives at.
+func leased(t *testing.T, amount float64, quantity int64) (*varvigcli.Fake, authority.Lease, string) {
+	t.Helper()
+	v := varvigcli.NewFake("test")
+	env := authority.Envelope{
+		Overseer: "overseer-a", SetAt: at.Unix(),
+		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 50000, Unit: "EUR", Quantity: 1000}},
+	}
+	if _, err := authority.PublishEnvelope(v, env, ""); err != nil {
+		t.Fatal(err)
+	}
+	l := authority.Lease{
+		CellID: "mini-a", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
+		Envelope: "1e20abc", Amount: amount, Unit: "EUR", Quantity: quantity, IssuedAt: at.Unix(),
+	}
+	hash, err := authority.PublishLease(v, l, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return v, l, hash
+}
 
 // Test11b_ReservationExecutesOnce is the durable half of FACTORY.md §9.11.
 // Deriving a stable key says what "the same action" means; claiming it in a ref
 // before executing is what actually stops the second order.
 func Test11b_ReservationExecutesOnce(t *testing.T) {
-	v := varvigcli.NewFake("test")
 	c := fabrication(t)
+	v, l, hash := leased(t, 1000, 20)
 	req := order(t, c)
 
-	r, hash, err := Reserve(v, req, "mini-a", at.Unix())
+	claim, err := Reserve(v, req, "mini-a", l, hash, at.Unix(), 3600)
 	if err != nil {
 		t.Fatalf("first reservation refused: %v", err)
 	}
-	if r.State != StatePending {
-		t.Fatalf("a fresh reservation is %q, want pending: the effect has not happened yet", r.State)
+	if claim.Reservation.State != StatePending {
+		t.Fatalf("a fresh reservation is %q, want pending: the effect has not happened yet", claim.Reservation.State)
 	}
 
 	// The cell places the order, then records the far end's identifier for it.
-	if _, err := Settle(v, r, hash, "PO-90210", at.Unix()+5); err != nil {
+	claim, err = Settle(v, claim, "PO-90210", 0, at.Unix()+5)
+	if err != nil {
 		t.Fatalf("settling: %v", err)
+	}
+	if claim.Lease.Spent != 320 || claim.Lease.Reserved != 0 {
+		t.Fatalf("settlement left the lease at spent=%g reserved=%g, want 320 and 0",
+			claim.Lease.Spent, claim.Lease.Reserved)
 	}
 
 	// Now the same intent arrives again — a restarted process, a re-run task, a
 	// retry after a lost response. It must not execute.
 	retry := order(t, c)
 	retry.Payload = map[string]any{"quantity": 5, "gerber": "1e20deadbeef"} // other key order
-	existing, _, err := Reserve(v, retry, "mini-a", at.Unix()+60)
+	again, err := Reserve(v, retry, "mini-a", claim.Lease, claim.LeaseHash, at.Unix()+60, 3600)
 	if !errors.Is(err, ErrAlreadyReserved) {
 		t.Fatalf("a repeat of a completed action returned %v, want ErrAlreadyReserved", err)
 	}
 	// And it is told what happened, not merely that it may not proceed: the
 	// answer to "did my order go through" is in the record.
-	if existing.State != StateDone || existing.ExternalRef != "PO-90210" {
-		t.Fatalf("the existing reservation did not report the outcome: %+v", existing)
+	if again.Reservation.State != StateDone || again.Reservation.ExternalRef != "PO-90210" {
+		t.Fatalf("the existing reservation did not report the outcome: %+v", again.Reservation)
+	}
+	// The refused repeat must not have taken a second hold.
+	held, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if held.Reserved != 0 {
+		t.Fatalf("a refused repeat held %g of lease headroom", held.Reserved)
 	}
 
 	// A genuinely different action is not blocked by it.
 	other := order(t, c)
 	other.Payload = map[string]any{"gerber": "1e20deadbeef", "quantity": 6}
-	if _, _, err := Reserve(v, other, "mini-a", at.Unix()+60); err != nil {
+	if _, err := Reserve(v, other, "mini-a", claim.Lease, claim.LeaseHash, at.Unix()+60, 3600); err != nil {
 		t.Fatalf("a different order was blocked by an unrelated reservation: %v", err)
 	}
 }
 
-func TestTheSameCellCannotReserveOneKeyTwice(t *testing.T) {
-	// Create-only is the whole locking mechanism. Two cells that both decide to
-	// act produce one winner and one refusal, using nothing but varvig's ref CAS.
-	v := varvigcli.NewFake("test")
+// Test11c_HoldsPreventTwoPendingOrdersExceedingTheLease is the property a
+// derived key alone does not give: without a hold, two pending actions each
+// check the same headroom, each pass, and together exceed the lease.
+func Test11c_HoldsPreventTwoPendingOrdersExceedingTheLease(t *testing.T) {
 	c := fabrication(t)
-	req := order(t, c)
+	v, l, hash := leased(t, 1000, 20)
 
-	if _, _, err := Reserve(v, req, "mini-a", at.Unix()); err != nil {
+	first := order(t, c)
+	first.Amount, first.Quantity = 700, 5
+	claim, err := Reserve(v, first, "mini-a", l, hash, at.Unix(), 3600)
+	if err != nil {
+		t.Fatalf("the first order was refused: %v", err)
+	}
+	if claim.Lease.Reserved != 700 || claim.Lease.Headroom() != 300 {
+		t.Fatalf("after holding 700 of 1000 the lease reports reserved=%g headroom=%g",
+			claim.Lease.Reserved, claim.Lease.Headroom())
+	}
+
+	// A second order that fits the *allocation* but not the remaining headroom.
+	// Nothing has settled yet, so a lease that only counted settled spend would
+	// wave this through and the two together would be 1400 of 1000.
+	second := order(t, c)
+	second.Task, second.Amount = "T-1043", 700
+	if _, err := Reserve(v, second, "mini-a", claim.Lease, claim.LeaseHash, at.Unix()+1, 3600); err == nil {
+		t.Fatal("two pending orders were allowed to exceed the lease together")
+	}
+
+	// One that fits the headroom is fine.
+	third := order(t, c)
+	third.Task, third.Amount, third.Quantity = "T-1044", 300, 2
+	if _, err := Reserve(v, third, "mini-a", claim.Lease, claim.LeaseHash, at.Unix()+1, 3600); err != nil {
+		t.Fatalf("an order inside the remaining headroom was refused: %v", err)
+	}
+
+	// The same rule applies to unit counts independently of money: ordering the
+	// last boards cheaply must not unlock a further order.
+	v2, l2, hash2 := leased(t, 100000, 10)
+	bulk := order(t, c)
+	bulk.Amount, bulk.Quantity = 10, 10
+	held, err := Reserve(v2, bulk, "mini-a", l2, hash2, at.Unix(), 3600)
+	if err != nil {
 		t.Fatal(err)
 	}
-	// The loser here reserves under its own cell's prefix, so it does *not*
-	// collide — a reservation is scoped to the cell that holds the lease, and two
-	// cells cannot hold one lease (§8.1). Same cell, same key is the collision
-	// that matters.
-	if _, _, err := Reserve(v, req, "mini-a", at.Unix()); !errors.Is(err, ErrAlreadyReserved) {
+	more := order(t, c)
+	more.Task, more.Amount, more.Quantity = "T-1043", 10, 1
+	if _, err := Reserve(v2, more, "mini-a", held.Lease, held.LeaseHash, at.Unix()+1, 3600); err == nil {
+		t.Fatal("a pending order holding every unit still left units to order")
+	}
+}
+
+// Test14_ReservationExpiry is FACTORY.md §9.14: an unsettled reservation
+// releases headroom rather than permanently consuming it — and, crucially, does
+// not release the key.
+func Test14_ReservationExpiry(t *testing.T) {
+	c := fabrication(t)
+	v, l, hash := leased(t, 1000, 20)
+	req := order(t, c)
+
+	claim, err := Reserve(v, req, "mini-a", l, hash, at.Unix(), 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claim.Lease.Reserved != 320 {
+		t.Fatalf("reserved = %g, want the quoted 320 held", claim.Lease.Reserved)
+	}
+
+	// Nothing came back. Before the timeout the headroom stays held: the action
+	// may be in flight.
+	lease, leaseHash, released, err := ReleaseExpired(v, claim.Lease, claim.LeaseHash, at.Unix()+60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(released) != 0 || lease.Reserved != 320 {
+		t.Fatalf("a hold inside its timeout was released: %+v", lease)
+	}
+
+	// Past the timeout the money comes back, so a lost response cannot consume
+	// budget for good.
+	lease, _, released, err = ReleaseExpired(v, lease, leaseHash, at.Unix()+7200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(released) != 1 {
+		t.Fatalf("released %d holds, want 1", len(released))
+	}
+	if lease.Reserved != 0 || lease.Headroom() != 1000 {
+		t.Fatalf("expiry did not return the headroom: reserved=%g headroom=%g", lease.Reserved, lease.Headroom())
+	}
+
+	// But the key does NOT come back. The action may have happened, and letting
+	// the key go is how the same order gets placed twice. Two resources, two
+	// rules: money on a timer, the right to act not at all.
+	if _, err := Reserve(v, order(t, c), "mini-a", lease, "", at.Unix()+7200, 3600); !errors.Is(err, ErrAlreadyReserved) {
+		t.Fatalf("an expired reservation released its key: %v", err)
+	}
+	// And it is still an action of unknown outcome, so it still shows up as
+	// pending for a principal to resolve.
+	pending, err := Pending(v, "mini-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || !pending[0].HoldReleased {
+		t.Fatalf("pending = %+v, want the one expired-but-unresolved action", pending)
+	}
+}
+
+func TestResolvingAnExpiredReservationThatDidHappenStillCharges(t *testing.T) {
+	// The nasty case: the hold was returned on the timer, then the overseer finds
+	// the order really was placed. The money must still leave the lease.
+	c := fabrication(t)
+	v, l, hash := leased(t, 1000, 20)
+	claim, err := Reserve(v, order(t, c), "mini-a", l, hash, at.Unix(), 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, leaseHash, _, err := ReleaseExpired(v, claim.Lease, claim.LeaseHash, at.Unix()+7200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := Pending(v, "mini-a")
+	if err != nil || len(pending) != 1 {
+		t.Fatalf("pending = %+v (err %v)", pending, err)
+	}
+
+	// Rebuild the handles, as an overseer tool would after listing.
+	claim2, err := LoadClaim(v, "mini-a", pending[0].Key, lease, leaseHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := Resolve(v, claim2, true, "overseer-a", "PO-90210 exists at the fab", at.Unix()+9000)
+	if err != nil {
+		t.Fatalf("resolving an expired-but-real order: %v", err)
+	}
+	if resolved.Lease.Spent != 320 {
+		t.Fatalf("spent = %g, want 320: the order happened and the lease owes it", resolved.Lease.Spent)
+	}
+	if resolved.Lease.Reserved != 0 {
+		t.Fatalf("reserved = %g, want 0: the hold was already returned", resolved.Lease.Reserved)
+	}
+}
+
+func TestTheSameCellCannotReserveOneKeyTwice(t *testing.T) {
+	// Create-only is the whole locking mechanism. Two attempts produce one winner
+	// and one refusal, using nothing but varvig's ref CAS.
+	c := fabrication(t)
+	v, l, hash := leased(t, 1000, 20)
+	req := order(t, c)
+
+	claim, err := Reserve(v, req, "mini-a", l, hash, at.Unix(), 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Reserve(v, req, "mini-a", claim.Lease, claim.LeaseHash, at.Unix(), 3600); !errors.Is(err, ErrAlreadyReserved) {
 		t.Fatalf("the same cell reserved one key twice: %v", err)
+	}
+}
+
+func TestReserveRefusesAnotherCellsLease(t *testing.T) {
+	c := fabrication(t)
+	v, l, hash := leased(t, 1000, 20)
+	if _, err := Reserve(v, order(t, c), "micro-b", l, hash, at.Unix(), 3600); err == nil {
+		t.Fatal("a cell reserved against a lease held by another cell")
+	}
+	// And a lease for a different capability than the action.
+	wrong := l
+	wrong.Capability = "shipping@1"
+	if _, err := Reserve(v, order(t, c), "mini-a", wrong, hash, at.Unix(), 3600); err == nil {
+		t.Fatal("an action was reserved against a lease for a different capability")
 	}
 }
 
@@ -78,13 +266,13 @@ func TestPendingIsTheStateThatEscalates(t *testing.T) {
 	// A crash between reserve and settle leaves pending, which is the honest
 	// record of the one state that matters: the cell does not know whether the
 	// order was placed.
-	v := varvigcli.NewFake("test")
 	c := fabrication(t)
-	r, hash, err := Reserve(v, order(t, c), "mini-a", at.Unix())
+	v, l, hash := leased(t, 1000, 20)
+	claim, err := Reserve(v, order(t, c), "mini-a", l, hash, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !r.Unresolved() {
+	if !claim.Reservation.Unresolved() {
 		t.Fatal("a reserved-but-unsettled action did not report unresolved")
 	}
 
@@ -92,42 +280,42 @@ func TestPendingIsTheStateThatEscalates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listing pending reservations: %v", err)
 	}
-	if len(pending) != 1 || pending[0].Key != r.Key {
+	if len(pending) != 1 || pending[0].Key != claim.Reservation.Key {
 		t.Fatalf("pending = %+v, want the one unresolved action", pending)
 	}
 
 	// The cell cannot clear it by retrying, and cannot clear it by deleting the
 	// reservation either: the key stays claimed.
-	if _, _, err := Reserve(v, order(t, c), "mini-a", at.Unix()+3600); !errors.Is(err, ErrAlreadyReserved) {
+	if _, err := Reserve(v, order(t, c), "mini-a", claim.Lease, claim.LeaseHash, at.Unix()+3600, 3600); !errors.Is(err, ErrAlreadyReserved) {
 		t.Fatalf("a pending action was retried: %v", err)
 	}
 
 	// A timeout is not a failure. Recording one as a failure would assert that
 	// no effect occurred, which is a different claim from "we never heard back".
-	if _, err := Fail(v, r, hash, "", at.Unix()+10); err == nil {
+	if _, err := Fail(v, claim, "", at.Unix()+10); err == nil {
 		t.Fatal("a failure was recorded with no rejection behind it")
 	}
 
 	// Nor can the cell resolve its own unknown state.
-	if _, err := Resolve(v, r, hash, true, "mini-a", "looked it up", at.Unix()+10); !errors.Is(err, ErrSelfAuthorization) {
+	if _, err := Resolve(v, claim, true, "mini-a", "looked it up", at.Unix()+10); !errors.Is(err, ErrSelfAuthorization) {
 		t.Fatalf("a cell resolved its own pending reservation: %v", err)
 	}
-	if _, err := Resolve(v, r, hash, true, "", "looked it up", at.Unix()+10); err == nil {
+	if _, err := Resolve(v, claim, true, "", "looked it up", at.Unix()+10); err == nil {
 		t.Fatal("a pending reservation was resolved by nobody in particular")
 	}
 
 	// A higher principal checks the external system and records what it found.
 	// That the record says a principal decided it is the point: it is the
 	// difference between a confirmed outcome and an assumed one.
-	if _, err := Resolve(v, r, hash, true, "overseer-a", "order PO-90210 exists at the fab", at.Unix()+600); err != nil {
+	after, err := Resolve(v, claim, true, "overseer-a", "order PO-90210 exists at the fab", at.Unix()+600)
+	if err != nil {
 		t.Fatalf("an overseer could not resolve a pending reservation: %v", err)
 	}
-	after, _, err := loadReservation(v, mustRef(t, "mini-a", r.Key))
-	if err != nil {
-		t.Fatal(err)
+	if after.Reservation.State != StateDone || !strings.Contains(after.Reservation.Detail, "overseer-a") {
+		t.Fatalf("the resolution did not record who decided it: %+v", after.Reservation)
 	}
-	if after.State != StateDone || !strings.Contains(after.Detail, "overseer-a") {
-		t.Fatalf("the resolution did not record who decided it: %+v", after)
+	if after.Lease.Spent != 320 || after.Lease.Reserved != 0 {
+		t.Fatalf("resolving as happened left the lease at spent=%g reserved=%g", after.Lease.Spent, after.Lease.Reserved)
 	}
 	if left, err := Pending(v, "mini-a"); err != nil || len(left) != 0 {
 		t.Fatalf("pending = %+v (err %v), want empty after resolution", left, err)
@@ -137,31 +325,76 @@ func TestPendingIsTheStateThatEscalates(t *testing.T) {
 func TestASettledSpendMustBeLookUpAble(t *testing.T) {
 	// The next question about an unexpected invoice is "which order was it", and
 	// the answer has to be in the record.
-	v := varvigcli.NewFake("test")
 	c := fabrication(t)
-	r, hash, err := Reserve(v, order(t, c), "mini-a", at.Unix())
+	v, l, hash := leased(t, 1000, 20)
+	claim, err := Reserve(v, order(t, c), "mini-a", l, hash, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Settle(v, r, hash, "", at.Unix()+5); err == nil {
+	if _, err := Settle(v, claim, "", 0, at.Unix()+5); err == nil {
 		t.Fatal("a spend was settled with no external reference to look up")
+	}
+	// Settling twice would spend the lease twice.
+	settled, err := Settle(v, claim, "PO-1", 0, at.Unix()+5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Settle(v, settled, "PO-1", 0, at.Unix()+6); err == nil {
+		t.Fatal("a settled reservation was settled again")
 	}
 }
 
-func TestAFailedActionIsNotRetriedAutomatically(t *testing.T) {
-	// A definite rejection means no effect occurred — but the key stays claimed.
-	// Whether to authorize a fresh attempt is a decision for a higher principal,
-	// not a loop behaviour (§6.7 rule 5).
-	v := varvigcli.NewFake("test")
+func TestSettlementRecordsActualAgainstQuoted(t *testing.T) {
+	// A quote that is not exact is normal; a pattern of them is a capability
+	// whose quotes cannot be trusted, which is worth surfacing rather than
+	// absorbing.
 	c := fabrication(t)
-	r, hash, err := Reserve(v, order(t, c), "mini-a", at.Unix())
+	v, l, hash := leased(t, 1000, 20)
+	claim, err := Reserve(v, order(t, c), "mini-a", l, hash, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Fail(v, r, hash, "fab rejected the gerber: layer count", at.Unix()+5); err != nil {
+	settled, err := Settle(v, claim, "PO-90210", 355.40, at.Unix()+5)
+	if err != nil {
+		t.Fatalf("settling above the quote: %v", err)
+	}
+	if settled.Lease.Spent != 355.40 {
+		t.Fatalf("spent = %g, want the actual 355.40 rather than the quoted 320", settled.Lease.Spent)
+	}
+	if settled.Reservation.Actual != 355.40 || !strings.Contains(settled.Reservation.Detail, "quoted 320") {
+		t.Fatalf("the divergence was absorbed rather than recorded: %+v", settled.Reservation)
+	}
+
+	// An actual that would push the lease past its allocation is refused: the
+	// lease cannot record a state it says is invalid.
+	v2, l2, hash2 := leased(t, 400, 20)
+	claim2, err := Reserve(v2, order(t, c), "mini-a", l2, hash2, at.Unix(), 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Settle(v2, claim2, "PO-2", 900, at.Unix()+5); err == nil {
+		t.Fatal("an actual beyond the whole lease was recorded without complaint")
+	}
+}
+
+func TestAFailedActionReleasesItsHoldButKeepsItsKey(t *testing.T) {
+	// A definite rejection means no effect occurred, so the money comes back —
+	// but the key stays claimed. Whether to authorize a fresh attempt is a
+	// decision for a higher principal, not a loop behaviour (§6.7 rule 5).
+	c := fabrication(t)
+	v, l, hash := leased(t, 1000, 20)
+	claim, err := Reserve(v, order(t, c), "mini-a", l, hash, at.Unix(), 3600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed, err := Fail(v, claim, "fab rejected the gerber: layer count", at.Unix()+5)
+	if err != nil {
 		t.Fatalf("recording a definite rejection: %v", err)
 	}
-	if _, _, err := Reserve(v, order(t, c), "mini-a", at.Unix()+60); !errors.Is(err, ErrAlreadyReserved) {
+	if failed.Lease.Reserved != 0 || failed.Lease.Spent != 0 || failed.Lease.Headroom() != 1000 {
+		t.Fatalf("a rejection did not return the headroom: %+v", failed.Lease)
+	}
+	if _, err := Reserve(v, order(t, c), "mini-a", failed.Lease, failed.LeaseHash, at.Unix()+60, 3600); !errors.Is(err, ErrAlreadyReserved) {
 		t.Fatalf("a failed action was silently retried: %v", err)
 	}
 	// It is not pending, though — a confirmed rejection is resolved, and listing
@@ -174,42 +407,33 @@ func TestAFailedActionIsNotRetriedAutomatically(t *testing.T) {
 func TestReservationRecordsTheInterfaceHash(t *testing.T) {
 	// A reservation read back years later must still name an unambiguous
 	// contract, even if the alias has since been re-pointed (§2.1).
-	v := varvigcli.NewFake("test")
 	c := fabrication(t)
-	r, _, err := Reserve(v, order(t, c), "mini-a", at.Unix())
+	v, l, hash := leased(t, 1000, 20)
+	claim, err := Reserve(v, order(t, c), "mini-a", l, hash, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Interface != c.Interface {
-		t.Fatalf("interface = %q, want the hash %q", r.Interface, c.Interface)
+	if claim.Reservation.Interface != c.Interface {
+		t.Fatalf("interface = %q, want the hash %q", claim.Reservation.Interface, c.Interface)
 	}
-	if r.AuthorizedBy != "overseer-a" {
-		t.Fatalf("authorized_by = %q; who authorized a spend is the first question asked about it", r.AuthorizedBy)
+	if claim.Reservation.AuthorizedBy != "overseer-a" {
+		t.Fatalf("authorized_by = %q; who authorized a spend is the first question asked about it", claim.Reservation.AuthorizedBy)
 	}
 }
 
 func TestReserveRefusesAMalformedRequest(t *testing.T) {
-	v := varvigcli.NewFake("test")
 	c := fabrication(t)
+	v, l, hash := leased(t, 1000, 20)
 	aliasOnly := c
 	aliasOnly.Interface = ""
-	if _, _, err := Reserve(v, order(t, aliasOnly), "mini-a", at.Unix()); err == nil {
+	if _, err := Reserve(v, order(t, aliasOnly), "mini-a", l, hash, at.Unix(), 3600); err == nil {
 		t.Fatal("an alias-only capability was reserved")
 	}
 	noTask := order(t, c)
 	noTask.Task = ""
-	if _, _, err := Reserve(v, noTask, "mini-a", at.Unix()); err == nil {
+	if _, err := Reserve(v, noTask, "mini-a", l, hash, at.Unix(), 3600); err == nil {
 		t.Fatal("a request with no task id was reserved")
 	}
-}
-
-func mustRef(t *testing.T, cellID, key string) string {
-	t.Helper()
-	name, err := cell.ReservationRef(cellID, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return name
 }
 
 // TestIntegrationReservationRefsAreAccepted drives the real varvig binary, and
@@ -234,27 +458,43 @@ func TestIntegrationReservationRefsAreAccepted(t *testing.T) {
 	}
 	v := varvigcli.Exec{Bin: bin, Dir: filepath.Join(dir, "repo")}
 
+	l := authority.Lease{
+		CellID: "mini-a", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
+		Envelope: "1e20abc", Amount: 1000, Unit: "EUR", Quantity: 20, IssuedAt: at.Unix(),
+	}
+	leaseHash, err := authority.PublishLease(v, l, "")
+	if err != nil {
+		t.Fatalf("real core refused a lease ref: %v", err)
+	}
+
 	c := fabrication(t)
 	req := order(t, c)
-	r, hash, err := Reserve(v, req, "mini-a", at.Unix())
+	claim, err := Reserve(v, req, "mini-a", l, leaseHash, at.Unix(), 3600)
 	if err != nil {
 		t.Fatalf("real core refused a reservation ref: %v", err)
+	}
+	if claim.Lease.Reserved != 320 {
+		t.Fatalf("the hold did not reach the lease ref: %+v", claim.Lease)
 	}
 
 	// Create-only against a real core, which is the property the whole mechanism
 	// rests on: whoever creates the ref executes, and everyone else is refused.
-	if _, _, err := Reserve(v, req, "mini-a", at.Unix()+1); !errors.Is(err, ErrAlreadyReserved) {
+	if _, err := Reserve(v, req, "mini-a", claim.Lease, claim.LeaseHash, at.Unix()+1, 3600); !errors.Is(err, ErrAlreadyReserved) {
 		t.Fatalf("a repeat reservation returned %v, want ErrAlreadyReserved", err)
 	}
 	if pending, err := Pending(v, "mini-a"); err != nil || len(pending) != 1 {
 		t.Fatalf("pending = %+v (err %v), want the one unresolved action", pending, err)
 	}
-	if _, err := Settle(v, r, hash, "PO-90210", at.Unix()+5); err != nil {
+	settled, err := Settle(v, claim, "PO-90210", 0, at.Unix()+5)
+	if err != nil {
 		t.Fatalf("settling against a real core: %v", err)
 	}
-	done, _, err := Reserve(v, req, "mini-a", at.Unix()+60)
-	if !errors.Is(err, ErrAlreadyReserved) || done.ExternalRef != "PO-90210" {
-		t.Fatalf("a settled reservation did not report its outcome: %+v (err %v)", done, err)
+	if settled.Lease.Spent != 320 || settled.Lease.Reserved != 0 {
+		t.Fatalf("settlement against a real core left %+v", settled.Lease)
+	}
+	done, err := Reserve(v, req, "mini-a", settled.Lease, settled.LeaseHash, at.Unix()+60, 3600)
+	if !errors.Is(err, ErrAlreadyReserved) || done.Reservation.ExternalRef != "PO-90210" {
+		t.Fatalf("a settled reservation did not report its outcome: %+v (err %v)", done.Reservation, err)
 	}
 	if pending, err := Pending(v, "mini-a"); err != nil || len(pending) != 0 {
 		t.Fatalf("pending = %+v (err %v), want empty after settlement", pending, err)
