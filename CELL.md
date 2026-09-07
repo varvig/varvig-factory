@@ -713,7 +713,11 @@ Stated as prohibitions because each one is a mistake with an attractive
 rationale.
 
 1. **No second scheduler.** A cell must not compute affected sets, assign
-   read/write sets, order concurrent work, or decide serialization. It submits
+   read/write sets, order concurrent work, or decide serialization. Nor may it
+   invent its own ticket ordering: which work matters most is learned by core
+   from recorded decisions (`tickets rank`), and a cell asks rather than
+   deciding — its own ordering would be one machine's opinion where core has the
+   whole history. It submits
    work to varvig and lets varvig serialize (§1). Conflating claim policy with
    task scheduling means reimplementing affected-set logic badly, in the layer
    least equipped to do it.

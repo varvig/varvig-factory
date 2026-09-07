@@ -725,6 +725,33 @@ me a circuit board" by writing code is the failure mode that rule exists to
 prevent, so the requirement survives with the reason attached and the ticket is
 skipped rather than reinterpreted.
 
+## Core decides the order
+
+Which work is most valuable is a repository-wide judgement made from recorded
+decisions, and core already learns it: `internal/score` fits a linear scorer
+from approve/veto history, backtests it, and reports the agreement a reviewer
+reads before promoting the scorer. `varvig tickets rank` is that ordering.
+
+So the cell asks rather than deciding. A cell computing its own ordering would
+be a second scheduler with a strictly worse view — one machine's opinion where
+core sees the whole history.
+
+Two properties of the wiring, both deliberate:
+
+- **It reorders and never filters.** `tickets rank` covers only *scoped*
+  tickets, so anything core does not mention keeps its place behind the ranked
+  ones. A ticket becoming invisible because it was unscoped would silently change
+  what the cell does, and the claim policy already has a clear refusal for that.
+- **A failure to rank is not a failure to work.** The cell logs it and proceeds
+  in listed order. An ordering hint that cannot be fetched should cost
+  throughput and nothing else — including against a core too old to have the
+  verb.
+
+Ranked ids come back in core's short form, so matching them to full ticket ids
+is the adapter's job, and an integration test pins that against the real binary.
+If core changes how it abbreviates, the loop would otherwise stop reordering
+silently — which looks exactly like a correctly ordered cell.
+
 ## Claims
 
 A claim is a TTL'd ref at `refs/claims/<cell-id>/<task-id>`. Three rules, and

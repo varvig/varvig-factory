@@ -72,6 +72,38 @@ type Ref struct {
 	Hash string `json:"hash"`
 }
 
+// Ranked is one ticket in core's ordering.
+type Ranked struct {
+	// ShortID is core's abbreviated ticket id, as `tickets rank` prints it.
+	// Matching it back to a full id is Match's job.
+	ShortID string
+	Score   float64
+	// Detail is the feature summary core printed, kept verbatim for logs: an
+	// operator asking "why is this first" wants core's own words, not Factory's
+	// paraphrase.
+	Detail string
+}
+
+// Matches reports whether a full ticket id is the one this ranking names.
+//
+// Core prints the digest's leading hex, which for a multihash id means the
+// short form starts four characters in, past the code and length prefix. Both
+// that and a plain prefix are accepted, because the abbreviation is core's
+// choice and not something Factory should encode a single guess about.
+func (r Ranked) Matches(fullID string) bool {
+	if r.ShortID == "" {
+		return false
+	}
+	if strings.HasPrefix(fullID, r.ShortID) {
+		return true
+	}
+	const multihashPrefix = 4
+	if len(fullID) >= multihashPrefix+len(r.ShortID) {
+		return fullID[multihashPrefix:multihashPrefix+len(r.ShortID)] == r.ShortID
+	}
+	return false
+}
+
 // Note is one note attached to an object.
 type Note struct {
 	Namespace string
@@ -179,6 +211,18 @@ type Varvig interface {
 	Scope(ticket string) (Scope, error)
 	// Blockers are the tickets blocking this one, derived by varvig.
 	Blockers(ticket string) ([]string, error)
+
+	// Rank returns core's ordering of the scoped tickets, best first.
+	//
+	// The ordering comes from core's learned scorer (tickets §3.3), which is fit
+	// from recorded approve/veto decisions and backtested before it is promoted.
+	// Factory asks rather than ordering tickets itself: which work is most
+	// valuable is a repository-wide judgement, and a cell that computed its own
+	// would be a second scheduler with a worse view (CELL.md §10.1).
+	//
+	// Ranked ids are core's **short** form, and only scoped tickets appear — so a
+	// caller reorders by this and never filters by it.
+	Rank() ([]Ranked, error)
 
 	// Refs lists every ref and the hash it resolves to.
 	Refs() ([]Ref, error)
@@ -701,6 +745,57 @@ func (e Exec) Commit(dir, message string) (string, error) {
 		return "", fmt.Errorf("varvigcli: could not read a change hash from %q", firstLine(out))
 	}
 	return fields[0], nil
+}
+
+// Rank implements Varvig. Format, one ticket per line:
+//
+//	7ffb2e065bce  score -0.100  (blast 1, unblocks 0, age 0s)
+//
+// There is no JSON plumbing for this one, so the porcelain is parsed and the
+// exact shape is pinned by an integration test against the real binary — the
+// only thing that can catch core changing it.
+//
+// A parse failure for one line is skipped rather than failing the call. Ranking
+// is an ordering hint: losing it degrades a cell to unordered work, while
+// failing the pass would stop the cell entirely over a cosmetic change to a
+// line Factory does not own.
+func (e Exec) Rank() ([]Ranked, error) {
+	out, err := e.run("tickets", "rank")
+	if err != nil {
+		if errors.Is(err, ErrUnsupported) {
+			// A core without the verb ranks nothing, and the caller keeps its
+			// existing order. Not an error: Factory must run against a core that
+			// predates this.
+			return nil, nil
+		}
+		return nil, err
+	}
+	return parseRankLines(out), nil
+}
+
+func parseRankLines(out string) []Ranked {
+	var ranked []Ranked
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		// Shortest meaningful line is "<id> score <n>".
+		if len(fields) < 3 || fields[1] != "score" {
+			continue
+		}
+		score, err := strconv.ParseFloat(fields[2], 64)
+		if err != nil {
+			continue
+		}
+		r := Ranked{ShortID: fields[0], Score: score}
+		if i := strings.Index(line, "("); i >= 0 {
+			r.Detail = strings.Trim(line[i:], "()")
+		}
+		ranked = append(ranked, r)
+	}
+	return ranked
 }
 
 // SpecAdd implements Varvig.

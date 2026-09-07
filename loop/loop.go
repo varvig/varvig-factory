@@ -457,7 +457,55 @@ func (c *Cell) observe() ([]claim.Ticket, error) {
 		}
 		out = append(out, t)
 	}
-	return out, nil
+	return c.rank(out), nil
+}
+
+// rank puts core's ordering on the tickets this pass will consider.
+//
+// Which work is most valuable is a repository-wide judgement made from recorded
+// decisions, and core already learns it (tickets §3.3). A cell that computed its
+// own ordering would be a second scheduler with a strictly worse view — it sees
+// one machine's opinion where core sees the whole history.
+//
+// It **reorders and never filters**. `tickets rank` covers only scoped tickets,
+// so anything core does not mention keeps its place after the ranked ones rather
+// than disappearing: a ticket becoming invisible because it was unscoped would
+// silently change what the cell does, and the claim policy already has a clear
+// refusal for that case.
+//
+// A failure to rank is not a failure to work. The cell logs it and proceeds in
+// the order it had, because an ordering hint that cannot be fetched should cost
+// throughput and nothing else.
+func (c *Cell) rank(tickets []claim.Ticket) []claim.Ticket {
+	ranked, err := c.V.Rank()
+	if err != nil {
+		c.logf("could not read core's ticket ranking, working in listed order: %v", err)
+		return tickets
+	}
+	if len(ranked) == 0 {
+		return tickets
+	}
+
+	remaining := make([]claim.Ticket, len(tickets))
+	copy(remaining, tickets)
+	out := make([]claim.Ticket, 0, len(tickets))
+	for _, r := range ranked {
+		for i, t := range remaining {
+			if t.ID == "" || !r.Matches(t.ID) {
+				continue
+			}
+			out = append(out, t)
+			remaining[i] = claim.Ticket{}
+			break
+		}
+	}
+	// Everything core did not rank, in the order it was listed.
+	for _, t := range remaining {
+		if t.ID != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // readClaimState reads foreign claims and this cell's own attempt counts from

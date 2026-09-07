@@ -52,6 +52,9 @@ type Fake struct {
 	// Partitioned makes Fetch and Push return ErrUnreachable. This is how the
 	// §9.2 and §9.3 tests take upstream away without taking the cell down.
 	Partitioned bool
+	// ranked is the order Rank reports, by full ticket id. Empty means core
+	// ranks nothing, which is what an unscoped repository looks like.
+	ranked []string
 	// UnsupportedVerbs makes the named commands return ErrUnsupported, so a cell
 	// running against an older core can be exercised. Keys are the command as it
 	// appears on the command line, e.g. "tickets attach-artifact".
@@ -225,6 +228,44 @@ func (f *Fake) Blockers(ticket string) ([]string, error) {
 }
 
 // Refs implements Varvig.
+// SetRank fixes the order Rank reports, best first, by full ticket id. Unset
+// means core ranks nothing — which is a real state, not a degenerate one: a
+// repository whose tickets are unscoped ranks none of them.
+func (f *Fake) SetRank(ticketIDs ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ranked = ticketIDs
+}
+
+// Rank implements Varvig. The Fake reports short ids the way core does — the
+// digest's leading hex, past the multihash prefix — because a fake that returned
+// full ids would let a caller match them by equality and hide that the real
+// thing does not.
+func (f *Fake) Rank() ([]Ranked, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.note("tickets rank")
+	if f.UnsupportedVerbs["tickets rank"] {
+		// A core that predates the verb. Exec turns this into "no ranking", so
+		// the Fake surfaces the error and lets the caller's own handling be the
+		// thing under test.
+		return nil, fmt.Errorf("%w: tickets rank", ErrUnsupported)
+	}
+	var out []Ranked
+	for i, id := range f.ranked {
+		short := id
+		if len(id) > 16 {
+			short = id[4:16]
+		}
+		out = append(out, Ranked{
+			ShortID: short,
+			Score:   float64(len(f.ranked) - i),
+			Detail:  "fake ordering",
+		})
+	}
+	return out, nil
+}
+
 func (f *Fake) Refs() ([]Ref, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
