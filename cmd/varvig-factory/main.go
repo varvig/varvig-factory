@@ -571,29 +571,63 @@ func cmdAuthority(args []string) error {
 	}
 
 	overseers := map[string]bool{}
+	// Load each overseer's envelope before printing, because a lease is not
+	// self-explanatory: one reading 1000 EUR while its envelope now allows 200 is
+	// a confusing thing to be shown without the second number.
+	envelopes := map[string]authority.Envelope{}
+	for _, l := range leases {
+		overseers[l.Overseer] = true
+	}
+	for overseer := range overseers {
+		if env, _, err := authority.LoadEnvelope(built.Varvig, overseer); err == nil {
+			envelopes[overseer] = env
+		}
+	}
+
 	fmt.Println("leases")
+	tightenedAny := false
 	for _, l := range leases {
 		mark := "  "
 		if l.CellID == me {
 			mark = "* "
 		}
-		fmt.Printf("%s%s\n", mark, l)
-		overseers[l.Overseer] = true
+		line := fmt.Sprintf("%s%s", mark, l)
+		if env, ok := envelopes[l.Overseer]; ok && l.Tightened(env) {
+			tightenedAny = true
+			if bounded, err := (authority.Grant{Envelope: env, Lease: &l}).Bounded(); err == nil {
+				line += fmt.Sprintf("  [envelope tightened: %.4g %s spendable]", bounded.Headroom(), l.Unit)
+			} else {
+				line += fmt.Sprintf("  [envelope no longer bounds this: %v]", err)
+			}
+		}
+		fmt.Println(line)
 	}
 	fmt.Printf("(* is this cell, %s)\n", me)
+	if tightenedAny {
+		fmt.Println("a tightened envelope caps the next action but does not claw back a lease;")
+		fmt.Println("tightening is enforced by not replenishing (CELL.md §8.1)")
+	}
 
 	fmt.Println("\noutstanding exposure — the sum of lease headroom, which is what the")
 	fmt.Println("overseer can still be committed to without issuing anything further")
+	if tightenedAny {
+		// Deliberately the unbounded figure: a partitioned cell has not seen the
+		// tightening and will spend its lease. Reporting the smaller bounded sum
+		// would understate exposure, which is the wrong direction to be wrong in.
+		fmt.Println("(computed from the leases as issued, not as tightened: a cell that has not")
+		fmt.Println(" seen the tightening will still spend its lease)")
+	}
 	exposure := authority.Exposure(leases)
 	for _, capability := range sortedKeys(exposure) {
 		fmt.Printf("  %-28s %.4g\n", capability, exposure[capability])
 	}
 
 	for _, overseer := range sortedKeys(overseers) {
-		env, _, err := authority.LoadEnvelope(built.Varvig, overseer)
-		if err != nil {
+		env, ok := envelopes[overseer]
+		if !ok {
 			// A lease naming an envelope this cell cannot read is worth saying
 			// out loud: the ceiling it is drawn from cannot be checked here.
+			_, _, err := authority.LoadEnvelope(built.Varvig, overseer)
 			fmt.Printf("\nenvelope %s: %v\n", overseer, err)
 			continue
 		}

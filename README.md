@@ -322,7 +322,38 @@ path and no renewal protocol to add. Grouped by reversibility rather than by
 
 Beyond the lease **escalates and never falls back to the envelope**: a lease that
 can be exceeded by drawing on the shared ceiling is advisory, and an advisory
-exclusive allocation is a shared one. `reclaim_after` is a signal to the
+exclusive allocation is a shared one.
+
+### Tightening bites; loosening does not
+
+An overseer who narrows an envelope mid-run has the tighter ceiling honoured
+before the cell's next effectful action — with **no fresh sync**, because
+adopting a tighter ceiling can only reduce spend, and being wrong there means
+spending less than authorized, which nobody has to undo. A *wider* envelope
+grants a cell nothing: the effective allocation is `min(lease, ceiling)`, so more
+headroom requires a **new lease**, which only the overseer can write.
+
+The minimum is the whole mechanism, and the asymmetry the spec asks for falls out
+of it for free — which is what lets this path keep §4.3b's property that
+effectful action inside a lease needs no connectivity. A staleness check here
+would have taken that back.
+
+Two things the cap does **not** buy, stated because a cap is easy to mistake for
+a guarantee:
+
+- **The ceiling is shared, so local capping does not bound the sum.** Three cells
+  each capping themselves at one ceiling still permits their total to exceed it.
+  Tightening is enforced by the overseer **not replenishing**; this is a floor of
+  safety underneath that.
+- **It cannot claw back an unspent lease without reaching the cell.** A
+  partitioned cell has not seen the tightening and will spend its lease —
+  acceptable rather than a hole, because exposure was bounded by the lease amount
+  when it was issued. `varvig-factory authority` therefore reports exposure from
+  the leases *as issued*, not as tightened.
+
+A tightening never un-spends money, and the bounded lease is a view for deciding,
+never a value to store — writing it back would rewrite the record of what the
+overseer actually committed to. `reclaim_after` is a signal to the
 overseer, not an expiry — it does not stop the holder spending, and a lease with
 any recorded spend is never reclaimed, because the cell may have placed an order
 it has not yet reported.
@@ -654,6 +685,10 @@ The authority model's numbered items live with the code they constrain, in
 | 11 | `Test11_Idempotency` | a retry after a mid-flight network failure derives the same key, so the action happens once |
 | 11b | `Test11b_ReservationExecutesOnce` | the key claimed in a ref before executing; a repeat is refused and told the outcome |
 | 11c | `Test11c_HoldsPreventTwoPendingOrdersExceedingTheLease` | a hold is counted against headroom, so two pending orders cannot both pass |
+| 12 | `Test12_EnvelopeTightening` | a tightened ceiling binds before the next action, with no sync; loosening grants nothing |
+| 12b | `Test12b_TighteningBelowWhatIsAlreadySpent` | a ceiling under the spend leaves zero headroom, and does not un-spend |
+| 12c | `Test12c_RemovingACapabilityIsTheSharpestTightening` | a capability dropped from the envelope refuses rather than reading as unbounded |
+| 12d | `Test12d_TighteningIsNotTheEnforcementMechanism` | records what local capping does *not* bound, so nobody mistakes it for a guarantee |
 | 13 | `Test13_StaleStateBehaviour` | offline: propose yes, promote no, effectful yes within a lease |
 | 13b | `Test13b_LeaseExclusivity` | leases never overlap and never sum past the envelope |
 | 13c | `Test13c_StrandedLease` | reclaim is provisional; a lease with recorded spend is never reclaimed |
@@ -661,9 +696,7 @@ The authority model's numbered items live with the code they constrain, in
 | 15 | `Test15_NoSelfAuthorization` | a promote key is not a purchasing credential |
 | 16 | `Test16_InterfaceHashBinding` | alias-only references are refused; same alias, different hash does not match |
 
-**§9.12 (envelope tightening) has no test because it has no implementation.** It
-is the one numbered item in the spec that this repository does not cover; see
-*Known gaps* below rather than reading the absence as an oversight.
+Every numbered item in the spec's §9 is now covered.
 
 Several of these exist, in the spec's words, "to keep it that way": the behaviour
 is already correct, and the test is there so a later refactor cannot quietly make
@@ -730,20 +763,21 @@ The spec's §10, and what shipped for each step:
 
 ## Known gaps
 
-The design notes are ahead of this code in four places. They are listed rather
-than left to be discovered, because a README that quietly omits something reads
-exactly like one describing a decision against it. [CELL.md §11](./CELL.md)
-carries the same list with the contract-level detail.
+The design notes are ahead of this code in three places, and one representation
+choice here is worth flagging. They are listed rather than left to be
+discovered, because a README that quietly omits something reads exactly like one
+describing a decision against it. [CELL.md §11](./CELL.md) carries the same list
+with the contract-level detail.
 
 | Gap | What is missing |
 |---|---|
 | **No rendezvous set** (§3.0) | The loop takes a single `upstream` address. It is not a coordinator, but "any member may act as a rendezvous, several at once" is not implemented, so a factory does not yet keep working when that particular member is unreachable. |
 | **No interface registry** (§2.1) | A capability reference already binds to the interface *hash*, which is the part that matters for safety. What is missing is the registry the hash points into: interfaces published as varvig objects and resolvable by hash. |
 | **No derived reputation** (§2.2) | Capability claims are advisory and standing should be derived from promotion history. Only the agreement-rate metric is derived today, and it is per scope rather than per cell. |
-| **No envelope tightening** (§9.12) | An overseer narrowing an envelope mid-run should have the tighter ceiling honoured before the next effectful action, while a loosening waits for sync. Today a cell checks its lease, which an envelope change does not touch — so reducing exposure means reclaiming or reissuing leases. |
+| **Money is a `float64`** | Amounts accumulate representation error — 1000 − 320 − 355.40 is 44.60000000000002 — and refusals round for display. No decision compares amounts for equality, so nothing turns on it today, but minor units are the right representation for a system that spends money. |
 
-The first three are scope; the fourth is the one to know about operationally,
-because it changes what "I tightened the envelope" accomplishes.
+The first three are scope. The fourth is a representation choice worth fixing
+before real money moves through it.
 
 ## Repository name
 

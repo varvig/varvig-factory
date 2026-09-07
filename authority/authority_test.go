@@ -397,3 +397,62 @@ func TestExposureExcludesHeldHeadroom(t *testing.T) {
 		t.Fatalf("exposure = %g, want 600", got)
 	}
 }
+
+func TestTightenedIsTheOperatorFacingQuestion(t *testing.T) {
+	env := envelope() // pcb-fabrication@1 at 5000 EUR / 100 units
+	l := lease("mini-a", "pcb-fabrication@1", 1000)
+	l.Quantity = 20
+
+	if l.Tightened(env) {
+		t.Fatal("a lease inside its envelope reported tightened")
+	}
+
+	tight := env
+	tight.Ceilings = []Ceiling{{Capability: "pcb-fabrication@1", Spend: 400, Unit: "EUR", Quantity: 100}}
+	if !l.Tightened(tight) {
+		t.Fatal("a lease above its envelope's ceiling did not report tightened")
+	}
+
+	// Quantity alone is enough to count as tightened, even when the money is
+	// untouched — ordering fewer boards for the same budget is still a narrower
+	// authority than the lease claims.
+	fewer := env
+	fewer.Ceilings = []Ceiling{{Capability: "pcb-fabrication@1", Spend: 5000, Unit: "EUR", Quantity: 5}}
+	if !l.Tightened(fewer) {
+		t.Fatal("a lower unit ceiling did not report tightened")
+	}
+
+	// A lease with no unit ceiling of its own, under an envelope that has one,
+	// is bounded where it previously was not.
+	unlimited := lease("mini-a", "pcb-fabrication@1", 100)
+	if !unlimited.Tightened(fewer) {
+		t.Fatal("an envelope unit ceiling did not bind a lease that had none")
+	}
+
+	// A capability the envelope no longer bounds is as tight as it gets.
+	gone := env
+	gone.Ceilings = []Ceiling{{Capability: "shipping@1", Spend: 10, Unit: "EUR"}}
+	if !l.Tightened(gone) {
+		t.Fatal("a revoked capability did not report tightened")
+	}
+}
+
+func TestConstrainIsAViewNotAValueToStore(t *testing.T) {
+	// The bounded lease must never be written back: it would rewrite the record
+	// of what the overseer committed to. This asserts the method does not mutate
+	// its receiver, which is what makes the rule easy to keep.
+	env := envelope()
+	env.Ceilings = []Ceiling{{Capability: "pcb-fabrication@1", Spend: 100, Unit: "EUR"}}
+	l := lease("mini-a", "pcb-fabrication@1", 1000)
+
+	bounded, err := l.Constrain(env)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bounded.Amount != 100 {
+		t.Fatalf("bounded amount = %g, want 100", bounded.Amount)
+	}
+	if l.Amount != 1000 {
+		t.Fatalf("Constrain mutated the lease it was called on: %g", l.Amount)
+	}
+}

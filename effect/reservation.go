@@ -101,7 +101,7 @@ func (r Reservation) Unresolved() bool { return r.State == StatePending }
 func (r Reservation) String() string {
 	s := fmt.Sprintf("%s %s/%s %s", short(r.Key), r.CellID, r.Capability, r.State)
 	if r.Amount > 0 {
-		s += fmt.Sprintf(" %g %s", r.Amount, r.Unit)
+		s += fmt.Sprintf(" %.2f %s", r.Amount, r.Unit)
 	}
 	if r.ExternalRef != "" {
 		s += " ref=" + r.ExternalRef
@@ -149,7 +149,7 @@ type Claim struct {
 // ttl is how long the hold lasts. Zero means no expiry, which is legitimate for
 // a capability that always answers synchronously — but for anything asynchronous
 // it means a lost response consumes the headroom for good, so set one.
-func Reserve(v varvigcli.Varvig, req Request, executingCell string, lease authority.Lease, leaseHash string, at, ttl int64) (Claim, error) {
+func Reserve(v varvigcli.Varvig, req Request, executingCell string, grant authority.Grant, at, ttl int64) (Claim, error) {
 	key, err := IdempotencyKey(req.Task, req.Capability, req.Payload)
 	if err != nil {
 		return Claim{}, err
@@ -158,6 +158,10 @@ func Reserve(v varvigcli.Varvig, req Request, executingCell string, lease author
 	if err != nil {
 		return Claim{}, err
 	}
+	if grant.Lease == nil {
+		return Claim{}, errors.New("effect: no lease is held for this capability; an effectful action spends from an exclusive allocation, never from a shared envelope")
+	}
+	lease := *grant.Lease
 	if lease.CellID != executingCell {
 		return Claim{}, fmt.Errorf("effect: %s cannot reserve against a lease held by %q; spend comes from the acting cell's own lease",
 			executingCell, lease.CellID)
@@ -169,10 +173,24 @@ func Reserve(v varvigcli.Varvig, req Request, executingCell string, lease author
 	// Look first, so the common "already done" case reports what happened rather
 	// than only that a swap was refused — and so an existing claim's hold is not
 	// taken a second time.
+	//
+	// This precedes the envelope check deliberately. "Did my order go through?"
+	// is the more urgent answer, and a tightening that arrived afterwards must
+	// not obscure an action that already happened — the envelope bounds what
+	// happens next, not what is already done.
 	if existing, hash, err := loadReservation(v, name); err == nil {
-		return Claim{Reservation: existing, Hash: hash, Lease: lease, LeaseHash: leaseHash},
+		return Claim{Reservation: existing, Hash: hash, Lease: lease, LeaseHash: grant.LeaseHash},
 			fmt.Errorf("%w: %s", ErrAlreadyReserved, existing)
 	} else if !errors.Is(err, varvigcli.ErrNoRef) {
+		return Claim{}, err
+	}
+
+	// The hold is taken against the envelope-bounded view, so a tightened
+	// envelope refuses the reservation here rather than at settlement — before
+	// the effect happens, which is the only point at which refusing helps
+	// (§9.12).
+	bounded, err := grant.Bounded()
+	if err != nil {
 		return Claim{}, err
 	}
 
@@ -180,11 +198,19 @@ func Reserve(v varvigcli.Varvig, req Request, executingCell string, lease author
 	// released; if *that* release fails, headroom leaks until the expiry returns
 	// it. Leaking headroom is recoverable and a double-spend is not, so the
 	// writes go in this order.
+	//
+	// The check runs against the bounded view and the write against the lease as
+	// issued: storing the bounded lease would rewrite the record of what the
+	// overseer actually committed to, and that record is the evidence for every
+	// later question about this spend.
+	if _, err := bounded.Hold(req.Amount, req.Quantity); err != nil {
+		return Claim{}, err
+	}
 	held, err := lease.Hold(req.Amount, req.Quantity)
 	if err != nil {
 		return Claim{}, err
 	}
-	heldHash, err := authority.PublishLease(v, held, leaseHash)
+	heldHash, err := authority.PublishLease(v, held, grant.LeaseHash)
 	if err != nil {
 		return Claim{}, err
 	}
@@ -257,7 +283,7 @@ func Settle(v varvigcli.Varvig, c Claim, externalRef string, actual float64, at 
 	r.State, r.ExternalRef, r.SettledAt, r.HoldReleased = StateDone, externalRef, at, true
 	if actual != r.Amount {
 		r.Actual = actual
-		r.Detail = fmt.Sprintf("quoted %g %s, actual %g %s", r.Amount, r.Unit, actual, r.Unit)
+		r.Detail = fmt.Sprintf("quoted %.2f %s, actual %.2f %s", r.Amount, r.Unit, actual, r.Unit)
 	}
 	hash, err := update(v, r, c.Hash)
 	if err != nil {
