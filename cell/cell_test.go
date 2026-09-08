@@ -310,7 +310,9 @@ func TestAttemptRefRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := "refs/attempts/mini-a/sha256:abc/3"; ref != want {
+	// Built from the constant rather than spelled again, so a namespace move is
+	// one edit and this test keeps asserting the shape rather than the literal.
+	if want := AttemptPrefix + "mini-a/sha256:abc/3"; ref != want {
 		t.Fatalf("ref = %s, want %s", ref, want)
 	}
 	cellID, taskID, n, err := ParseAttemptRef(ref)

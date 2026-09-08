@@ -11,17 +11,42 @@ import (
 // surface: a cell that writes them somewhere else is not federating, it is
 // keeping a private diary.
 const (
+	// Prefix is the single root every Factory ref nests under, and the reason
+	// they nest is that the *shapes* here are generic while the *semantics* are
+	// not. Any multi-worker system wants something called a claim; a Factory
+	// claim is advisory, expiring, never exclusive, and says nothing at all
+	// across a partition. A system that reasonably made claims exclusive would
+	// be writing a different meaning under the same name, and no reader could
+	// tell the two apart.
+	//
+	// That collision has already happened once between these two projects:
+	// varvig's own speculation store calls its candidates "attempt-states",
+	// stored as files under `.varvig/spec/`, while a Factory attempt is a ref
+	// with different immutability rules. Two concepts, one word. Nesting at
+	// least says whose.
+	//
+	// What makes these semantics reusable is this contract being written down,
+	// not the prefix being shared: another layer implementing leases under its
+	// own root has benefited, while one writing into this root with its own
+	// lease model has created a hazard.
+	Prefix = "refs/factory/"
+
 	// CapabilitiesPrefix roots the per-cell static capabilities ref.
-	CapabilitiesPrefix = "refs/factory/cells/"
+	CapabilitiesPrefix = Prefix + "cells/"
 	// AttemptPrefix roots the immutable attempt refs.
-	AttemptPrefix = "refs/attempts/"
+	AttemptPrefix = Prefix + "attempts/"
 	// ClaimPrefix roots the advisory, TTL'd claim refs.
-	ClaimPrefix = "refs/claims/"
+	ClaimPrefix = Prefix + "claims/"
 	// PinPrefix roots retention requests. This is varvig's own pin namespace
 	// (FEDERATION.md §4) — Factory adds no primitive of its own, it just names
 	// what upstream should retain. The name shape below is varvig's too, not
 	// Factory's: a pin written in a shape varvig cannot parse would still occupy
 	// the namespace while failing to be recognised as a pin.
+	//
+	// It is deliberately **not** under Prefix. Pins are varvig's own federation
+	// primitive — its GC root walk and its pin handlers both act on that name —
+	// so moving them under a Factory root would break the core rather than tidy
+	// anything. Factory requests retention here; it does not own the namespace.
 	PinPrefix = "refs/pins/"
 
 	// NoteEvidence carries an attempt's evidence records (CELL.md §4.1).
@@ -53,14 +78,14 @@ const (
 	// of these refs — that is the owner's one non-delegable act, and it is what
 	// makes "no agent can widen its own envelope" true by construction rather
 	// than by a check anyone could forget.
-	EnvelopePrefix = "refs/envelopes/"
+	EnvelopePrefix = Prefix + "envelopes/"
 	// LeasePrefix roots per-cell, per-capability budget leases: exclusive
 	// allocations drawn from an envelope (CELL.md §11.2). Exclusive is why a
 	// stale lease is safe to spend.
-	LeasePrefix = "refs/leases/"
+	LeasePrefix = Prefix + "leases/"
 	// ReservationPrefix roots reservations held against a lease while an
 	// effectful action is in flight (CELL.md §12.3).
-	ReservationPrefix = "refs/reservations/"
+	ReservationPrefix = Prefix + "reservations/"
 )
 
 // ValidID reports whether s is a well-formed cell id: lowercase alphanumeric
