@@ -46,11 +46,22 @@ type Fake struct {
 	hooks     map[string][]func([]byte) HookResult
 	trust     []TrustEntry
 
-	// Upstream is the peer Fetch and Push exchange with. Nil means this cell has
-	// no upstream configured, which is a legitimate single-cell deployment.
+	// Upstream is the peer Fetch and Push exchange with when Peers does not name
+	// the address. Nil means this cell has no peer configured, which is a
+	// legitimate single-cell deployment.
 	Upstream *Fake
-	// Partitioned makes Fetch and Push return ErrUnreachable. This is how the
-	// §9.2 and §9.3 tests take upstream away without taking the cell down.
+	// Peers routes an exchange by the address it was asked for, so a cell with a
+	// rendezvous set reaches a *different* peer per address.
+	//
+	// Without it every address resolves to the one Upstream, and a test of a
+	// three-peer set would be a test of one peer contacted three times — which
+	// is exactly the property a rendezvous set exists to provide and so exactly
+	// the one a fake must not fake away. An address absent from this map is
+	// unreachable, which is how a test takes one member of a set down.
+	Peers map[string]*Fake
+	// Partitioned makes every exchange return ErrUnreachable, whichever peer was
+	// asked for. It is how the §9.2 and §9.3 tests take the network away without
+	// taking the cell down.
 	Partitioned bool
 	// ranked is the order Rank reports, by full ticket id. Empty means core
 	// ranks nothing, which is what an unscoped repository looks like.
@@ -588,7 +599,7 @@ func (f *Fake) SpecPrune(task string, keep int) error {
 // the reconnect behaviour §5.2 describes (CAS fails safely rather than
 // overwriting).
 func (f *Fake) Fetch(addr, branch string) error {
-	up, err := f.peer("Fetch")
+	up, err := f.peer("Fetch", addr)
 	if err != nil {
 		return err
 	}
@@ -649,7 +660,7 @@ func (f *Fake) Fetch(addr, branch string) error {
 // refused with ErrCAS rather than overwritten — the same rule as Fetch, from the
 // other side.
 func (f *Fake) Push(addr, branch string) error {
-	up, err := f.peer("Push")
+	up, err := f.peer("Push", addr)
 	if err != nil {
 		return err
 	}
@@ -701,16 +712,23 @@ func (f *Fake) Push(addr, branch string) error {
 	return nil
 }
 
-func (f *Fake) peer(call string) (*Fake, error) {
+func (f *Fake) peer(call, addr string) (*Fake, error) {
 	f.mu.Lock()
 	f.note(call)
-	partitioned, up := f.Partitioned, f.Upstream
+	partitioned, up, byAddr := f.Partitioned, f.Upstream, f.Peers
 	f.mu.Unlock()
 	if partitioned {
 		return nil, fmt.Errorf("%w: %s is partitioned", ErrUnreachable, f.Label)
 	}
+	if byAddr != nil {
+		p, ok := byAddr[addr]
+		if !ok || p == nil {
+			return nil, fmt.Errorf("%w: %s cannot reach %s", ErrUnreachable, f.Label, addr)
+		}
+		return p, nil
+	}
 	if up == nil {
-		return nil, fmt.Errorf("%w: %s has no upstream", ErrUnreachable, f.Label)
+		return nil, fmt.Errorf("%w: %s has no peer", ErrUnreachable, f.Label)
 	}
 	return up, nil
 }

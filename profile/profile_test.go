@@ -63,7 +63,7 @@ func TestTemplatesDifferOnlyInFieldValues(t *testing.T) {
 	mediumAsMini := medium
 	mediumAsMini.Profile = mini.Profile
 	mediumAsMini.CellID = mini.CellID
-	mediumAsMini.Upstream = mini.Upstream
+	mediumAsMini.Rendezvous, mediumAsMini.FactoryRendezvous = mini.Rendezvous, mini.FactoryRendezvous
 	mediumAsMini.Branch = mini.Branch
 	if !reflect.DeepEqual(mediumAsMini, mini) {
 		t.Fatal("the medium template differs from mini in more than its upstream and branch")

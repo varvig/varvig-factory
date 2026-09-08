@@ -198,17 +198,22 @@ type Config struct {
 	FactoryRepo string `json:"factory_repo,omitempty"`
 	// VarvigBin overrides the `varvig` binary.
 	VarvigBin string `json:"varvig_bin,omitempty"`
-	Upstream  string `json:"upstream,omitempty"`
-	// FactoryUpstream is the peer the coordination replica syncs with.
+	// Rendezvous is the set of peers the project replica syncs with.
 	//
-	// There is deliberately no fallback to Upstream when this is empty. A cell
-	// with two real repositories and only Upstream set would fetch its
-	// authority from its project peer, which is the wrong peer for the question
-	// "what may I spend" — and a default that is right for one deployment shape
-	// and silently wrong for another is worse than no default. A collapsed
-	// deployment sets both fields to the same address and says so.
-	FactoryUpstream string `json:"factory_upstream,omitempty"`
-	Branch          string `json:"branch,omitempty"`
+	// A set, not a priority list: every member is equally a rendezvous, all of
+	// them are contacted each pass, and the order is shuffled so none is
+	// systematically first (FACTORY.md §3.0). Empty is a single-cell deployment.
+	Rendezvous []string `json:"rendezvous,omitempty"`
+	// FactoryRendezvous is the set of peers the coordination replica syncs with.
+	//
+	// There is deliberately no fallback to Rendezvous when this is empty. A cell
+	// with two real repositories and only the project set configured would fetch
+	// its authority from project peers, which are the wrong peers for the
+	// question "what may I spend" — and a default that is right for one
+	// deployment shape and silently wrong for another is worse than no default.
+	// A collapsed deployment names the same addresses in both and says so.
+	FactoryRendezvous []string `json:"factory_rendezvous,omitempty"`
+	Branch            string   `json:"branch,omitempty"`
 
 	Roles []cell.Role `json:"roles"`
 	Build []string    `json:"build,omitempty"`
@@ -357,29 +362,56 @@ func Mini(cellID string) Config {
 	return c
 }
 
-// Medium is a Mini cell pointed at an upstream peer — the federation-wide tier
-// (§3). It differs from Mini in one field, which is the honest shape of the
-// difference: "N cells plus an upstream peer" is a deployment, not a tier of
-// binary.
-func Medium(cellID, upstream string) Config {
+// Medium is a Mini cell that syncs with a rendezvous set — the federation-wide
+// class (§3). It differs from Mini in one field, which is the honest shape of
+// the difference: "N cells that sync with each other" is a deployment, not a
+// class of binary.
+//
+// The variadic argument is a set and not a first-plus-fallbacks: every address
+// given is contacted each pass, in a shuffled order, and none of them is a
+// coordinator (§3.0).
+func Medium(cellID string, rendezvous ...string) Config {
 	c := Mini(cellID)
 	c.Profile = "medium"
-	c.Upstream = upstream
+	c.Rendezvous = rendezvous
+	// A Medium cell built this way is the collapsed, single-project shape, so
+	// the same peers serve both repositories. Stated rather than defaulted:
+	// there is no fallback, and a factory with a second project sets
+	// factory_rendezvous to its own peers.
+	c.FactoryRendezvous = rendezvous
 	c.Branch = "refs/heads/main"
 	return c
 }
 
 // Template returns a named starting profile.
-func Template(name, cellID, upstream string) (Config, error) {
+//
+// rendezvous may name several peers, comma-separated, because a set of one is a
+// factory that stops when that one goes away — which is the thing a set exists
+// to prevent. A Medium cell with no peers named is a Mini cell that has been
+// given a class name, and is accepted as such rather than refused.
+func Template(name, cellID, rendezvous string) (Config, error) {
 	switch strings.ToLower(name) {
 	case "micro":
 		return Micro(cellID), nil
 	case "mini":
 		return Mini(cellID), nil
 	case "medium":
-		return Medium(cellID, upstream), nil
+		return Medium(cellID, splitPeers(rendezvous)...), nil
 	}
 	return Config{}, fmt.Errorf("profile: unknown profile %q (want micro, mini or medium)", name)
+}
+
+// splitPeers parses a comma-separated rendezvous set, dropping blanks so a
+// trailing comma or a stray space is not turned into an address nothing can
+// dial.
+func splitPeers(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if addr := strings.TrimSpace(part); addr != "" {
+			out = append(out, addr)
+		}
+	}
+	return out
 }
 
 // Load reads a config file.
@@ -631,8 +663,8 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		Sandbox:            box,
 		Artifacts:          store,
 		Ledger:             ledger,
-		Upstream:           c.Upstream,
-		FactoryUpstream:    c.FactoryUpstream,
+		Rendezvous:         loop.Peers(c.Rendezvous),
+		FactoryRendezvous:  loop.Peers(c.FactoryRendezvous),
 		Branch:             c.Branch,
 		Checks:             c.checks(),
 		ClaimTTL:           c.ClaimTTL.D(30 * time.Minute),

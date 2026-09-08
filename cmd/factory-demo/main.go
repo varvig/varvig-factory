@@ -1,5 +1,5 @@
 // Command factory-demo runs the Medium prototype from FACTORY.md §10.7 — two
-// cells and one upstream — end to end, against in-memory fakes.
+// cells and one rendezvous peer — end to end, against in-memory fakes.
 //
 // It exists for the same reason varvig-connectors ships a reference connector:
 // the interesting parts of this system are the interactions, and a description
@@ -65,7 +65,7 @@ func run() error {
 	}
 	defer os.RemoveAll(work)
 
-	// The upstream is a varvig peer and nothing more: no Factory process, no
+	// The rendezvous is a varvig peer and nothing more: no Factory process, no
 	// queue, no RPCs (§1.1). Coordination happens by exchanging repository state.
 	upstream := varvigcli.NewFake("upstream")
 	seedTicket(upstream)
@@ -73,7 +73,7 @@ func run() error {
 	mini := newCell(work, "mini-a", upstream, attemptRoles(), largeTier())
 	micro := newCell(work, "micro-b", upstream, verifyRoles(), noTier())
 
-	// Both cells start from upstream's state.
+	// Both cells start from the rendezvous peer's state.
 	for _, c := range []*demoCell{mini, micro} {
 		if err := c.v.Fetch("upstream", branch); err != nil {
 			return err
@@ -100,7 +100,7 @@ func run() error {
 	fmt.Printf("  evidence  %s from mini-a — self-produced, and therefore never enough on its own (§6.3.1)\n",
 		verdict(att.Evidence))
 
-	// micro-b picks up the attempt from upstream and verifies it. Nothing told it
+	// micro-b picks up the attempt from the rendezvous peer and verifies it. Nothing told it
 	// to: it read the repository.
 	if err := micro.v.Fetch("upstream", branch); err != nil {
 		return err
@@ -558,12 +558,12 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 		Sandbox:   &sandbox.Fake{},
 		Artifacts: &artifact.LocalCAS{Root: filepath.Join(work, id, "artifacts")},
 		Ledger:    ledger,
-		Upstream:  "upstream",
-		// The demo's one replica serves both roles, so both peers are the same
-		// peer — stated explicitly, because there is no fallback that would
-		// guess it (see profile.Config.FactoryUpstream).
-		FactoryUpstream: "upstream",
-		Branch:          branch,
+		// The demo's one replica serves both roles, so the same rendezvous set
+		// serves both — stated explicitly, because there is no fallback that
+		// would guess it (see profile.Config.FactoryRendezvous).
+		Rendezvous:        loop.Peers{"upstream"},
+		FactoryRendezvous: loop.Peers{"upstream"},
+		Branch:            branch,
 		Checks: []loop.Check{
 			{Name: "build", Command: []string{"true"}, Kind: cell.RoleBuild},
 			{Name: "unit", Command: []string{"true"}, Kind: cell.RoleVerify},

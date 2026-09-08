@@ -74,7 +74,9 @@ func usage() {
 	fmt.Fprint(os.Stderr, `varvig-factory — an autonomous cell that turns tickets into verified,
 promotable changes on top of varvig.
 
-  varvig-factory init --profile micro|mini|medium --cell-id ID [--upstream ADDR]
+  varvig-factory init --profile micro|mini|medium --cell-id ID
+                     [--rendezvous ADDR[,ADDR...]]   peers to sync with; a set,
+                                                     not a priority order
                                     write a starting config (default: `+defaultConfig+`)
   varvig-factory capabilities [-c F] print this cell's capabilities and publish them
   varvig-factory once [-c F]         run one pass of the cell loop and report
@@ -163,7 +165,7 @@ func cmdVersion([]string) error {
 }
 
 func cmdInit(args []string) error {
-	f, err := parseFlags(args, []string{"profile", "cell-id", "upstream"}, []string{"force"})
+	f, err := parseFlags(args, []string{"profile", "cell-id", "rendezvous", "upstream"}, []string{"force"})
 	if err != nil {
 		return err
 	}
@@ -178,7 +180,14 @@ func cmdInit(args []string) error {
 	if err := cell.CheckID(cellID); err != nil {
 		return err
 	}
-	cfg, err := profile.Template(name, cellID, f.values["upstream"])
+	// --upstream is still accepted and means the same thing, because the word is
+	// what a reader reaches for first. It is not the name the design uses: a
+	// rendezvous is not upstream of anything (§3.0).
+	rendezvous := f.values["rendezvous"]
+	if rendezvous == "" {
+		rendezvous = f.values["upstream"]
+	}
+	cfg, err := profile.Template(name, cellID, rendezvous)
 	if err != nil {
 		return err
 	}
