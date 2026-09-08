@@ -172,7 +172,8 @@ func TestACellWithoutACoordinationReplicaWillNotStart(t *testing.T) {
 // reachability that decides it — not the project peer's.
 func TestTrustCurrencyFollowsTheFactoryPeer(t *testing.T) {
 	c, coord, work, _ := splitCell(t, 1000)
-	c.Upstream, c.FactoryUpstream = "project-peer", "factory-peer"
+	c.Rendezvous = Peers{"project-peer"}
+	c.FactoryRendezvous = Peers{"factory-peer"}
 	coord.Upstream = varvigcli.NewFake("factory-peer")
 	work.Upstream = varvigcli.NewFake("project-peer")
 

@@ -1,6 +1,6 @@
 # The Cell Contract
 
-*Normative. Version 3* — adds the repository split (§2.1), authority (§8.1),
+*Normative. Version 4* — adds rendezvous sets and the repository split (§2.1), authority (§8.1),
 effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
@@ -150,15 +150,37 @@ different repositories, every settlement is two writes with no shared
 transaction — not by oversight but in principle. The lease is written first,
 always. §8.2 states the rule and what each failure window leaves behind.
 
-**Rendezvous.** Whichever peer a cell dials to sync, chosen for reachability —
-not a role, not a coordinator, not an "upstream" in any privileged sense (§3.0).
-Both repository kinds sync through the same mechanism. Reachability of the two
-is tracked separately, because it answers two different questions: the project
-peer decides whether the cell is looking at current *work* (the offline mode of
-§5.2), and the coordination peer decides whether its *trust state* is current
-(the promotion gate of §4.3b). A cell cut off from its project peer may still
-promote what it already holds; a cell cut off from the coordination peer may
-not, because it cannot know who is still allowed to sign.
+**Rendezvous.** A cell syncs against a *set* of peers per repository kind — not
+a role, not a coordinator, not an "upstream" in any privileged sense (§3.0). Any
+member may serve, several at once.
+
+Three properties make the set a mesh rather than a fallback list:
+
+- **Every member is contacted each pass**, in both directions. Peer B may hold a
+  lease or an attempt that A has never seen; taking A's answer and stopping would
+  rely on A to relay the rest, which makes A a coordinator however the config
+  describes it.
+- **The order is shuffled.** Reserved-ref replication takes what the cell lacks
+  and *reports* rather than overwrites when both sides hold a ref at unrelated
+  values, so on a contested claim whichever peer is contacted first is the one
+  whose version is adopted. A fixed order would hand that to whoever was typed
+  into the config first.
+- **Reached is not the same as answered.** varvig's head push moves under a
+  force-with-lease against one tracking ref, so with several peers at most one
+  can accept a head push and the rest are refused as a matter of course. Those
+  peers were reached — notes and reserved refs replicated, authority state
+  arrived, only the branch disagreed — and counting that as unreachable would
+  mark trust stale for a reason that has nothing to do with trust. Only a
+  failure to make contact at all counts.
+
+The two kinds have their own sets, with no fallback between them, because they
+answer different questions: the project peers decide whether the cell is looking
+at current *work* (the offline mode of §5.2), and the coordination peers decide
+whether its *trust state* is current (the promotion gate of §4.3b). A cell cut
+off from its project peers may still promote what it already holds; a cell cut
+off from the coordination peers may not, because it cannot know who is still
+allowed to sign. An empty set is a single-cell deployment: nothing to be
+disconnected from, and neither offline nor stale.
 
 **The single-project case.** One repository may serve both roles, and for a
 factory with one codebase there is nothing to fragment. The two roles remain
@@ -921,16 +943,19 @@ like one that has decided against it.
 
 **Cell classes, not tiers, and factories are flat.** Micro, Mini and Medium
 describe *capacity*; a factory is one or more cooperating cells with no
-hierarchy. The terminology is corrected throughout this document and the
-implementation has no branch on the class name — but one behavioural gap
-remains: **there is no designated rendezvous peer** in the design, and any
-member may serve as one, several at once. The loop now takes one address *per
-repository kind* — a project peer and a coordination peer (§2.1) — which is the
-shape the split needs, but each is still a single address rather than a set. It
-is enough for a cell to sync and neither is a coordinator: nothing is read from
-either that a peer could not serve. What is missing is the "any member, several
-at once" the design asks for, so a factory still stops syncing a repository when
-that repository's one configured peer is unreachable.
+hierarchy. The terminology is corrected throughout this document, the
+implementation has no branch on the class name, and rendezvous is now a set per
+repository kind (§2.1) rather than a single address — so a factory keeps working
+when any particular member is unreachable.
+
+One limitation remains, and it is varvig's rather than this contract's: there is
+one remote-tracking ref per branch, not one per peer, so a cell's head push
+carries a lease learned from whichever peer it last fetched. With several peers
+at most one can accept a head push and the rest are refused. That is safe — a
+rejection, never an overwrite — and since `FEDERATION.md` §6 the refusal no
+longer suppresses the notes and reserved refs travelling alongside, so authority
+and evidence still reach every member. Only the *branch* converges by relay
+rather than directly.
 
 **Interfaces are not yet varvig objects.** A capability reference already binds
 to the interface *hash* rather than the alias (§8.2), which is the part that

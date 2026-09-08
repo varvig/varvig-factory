@@ -83,7 +83,7 @@ attempt**. That is the recommended default and the subject of the next section.
 
 The config it writes is *collapsed*: one repository serving both the
 coordination and the project role, which is correct for a factory with a single
-codebase. Set `factory_repo` and `factory_upstream` when there is a second
+codebase. Set `factory_repo` and `factory_rendezvous` when there is a second
 project — that is the point at which each project growing its own copy of what
 the cell may spend stops being harmless. See "One factory repository, N project
 repositories" below.
@@ -125,10 +125,9 @@ function that turns a config into a running cell — never reads the profile nam
 and [a test](./profile/profile_test.go) reads its syntax tree to prove it. If a
 class ever requires a branch in the code, the abstraction has failed.
 
-> One gap between this and the code: the loop still takes a single `upstream`
-> address to sync against. It is not a coordinator — nothing reads from it that a
-> peer could not serve — but "any member may act as a rendezvous, several at
-> once" is not implemented yet. See [CELL.md §11](./CELL.md).
+The code matches: a cell syncs against a **set** of peers per repository kind,
+contacts every member each pass, and shuffles the order so none is
+systematically first. See "Rendezvous is a set" below.
 
 ### Micro's honest role
 
@@ -820,16 +819,45 @@ condition named in the message.
 One repository made one reachability answer serve both. Two make them separate,
 and they were never the same question:
 
-- **The project peer** decides whether the cell is looking at current *work*.
+- **The project peers** decide whether the cell is looking at current *work*.
   Unreachable is the offline mode: a tighter budget, claims marked offline, work
   continuing from the view it has.
-- **The coordination peer** decides whether the cell's *trust state* is current.
-  Membership and `allowed_keys` live there, so it is that peer, and only that
-  one, which the promotion gate reads.
+- **The coordination peers** decide whether the cell's *trust state* is current.
+  Membership and `allowed_keys` live there, so it is those peers, and only
+  those, which the promotion gate reads.
 
-A cell cut off from its project peer may still promote what it already holds. A
-cell cut off from the coordination peer may not — it cannot know who is still
+A cell cut off from its project peers may still promote what it already holds. A
+cell cut off from the coordination peers may not — it cannot know who is still
 allowed to sign.
+
+## Rendezvous is a set, and that is what makes a factory live
+
+A cell syncs against a **set** of peers per repository kind. Any member may
+serve, several at once — not a role, not a coordinator, not an upstream (§3.0).
+An empty set is a single-cell deployment: nothing to be disconnected from, and
+so neither offline nor stale.
+
+Three properties separate a mesh from a fallback list:
+
+| Property | Why |
+|---|---|
+| **Every member is contacted each pass**, in both directions | Peer B may hold a lease or an attempt A has never seen. Taking A's answer and stopping relies on A to relay the rest — which makes A a coordinator however the config describes it. |
+| **The order is shuffled** | Reserved-ref replication takes what the cell lacks and *reports* rather than overwrites on a conflict, so on a contested claim the peer contacted first is the one whose version is adopted. A fixed order hands that to whoever was typed in first. |
+| **Reached ≠ answered** | varvig's head push uses one tracking ref, so with several peers at most one can accept a head push and the rest are refused every pass. Those peers were reached — authority and evidence arrived, only the branch disagreed. Counting that as unreachable would mark trust stale for a reason unrelated to trust. |
+
+The test that matters most runs three real `varvig serve` processes, each
+holding a ticket only it knows about, and asserts the cell ends the pass holding
+all three and having reported its spend to every one of them. Making the
+implementation a fallback list makes it fail with *"a set that stops at the
+first answer is a fallback list, not a mesh"*.
+
+**One varvig limitation remains.** There is one remote-tracking ref per branch,
+not one per peer, so a head push carries a lease learned from whichever peer was
+fetched last; with several peers at most one can accept it. That is safe — a
+rejection, never an overwrite — and since a peer's refused branch no longer
+suppresses the notes and reserved refs travelling alongside it
+(varvig `FEDERATION.md` §6), authority and evidence still reach every member.
+Only the *branch* converges by relay rather than directly.
 
 ## One namespace root
 
@@ -1015,13 +1043,13 @@ with the contract-level detail.
 
 | Gap | What is missing |
 |---|---|
-| **No rendezvous set** (§3.0) | The loop now takes one address *per repository kind* — a project peer and a coordination peer — which is the shape the split needs, but each is still a single address. Neither is a coordinator; nothing is read from either that a peer could not serve. What is missing is "any member may act as a rendezvous, several at once", so a factory still stops syncing a repository when that repository's one configured peer is unreachable. |
+| **One tracking ref per branch, not per peer** (varvig) | Not a Factory gap but the one that shapes it: a head push carries a lease learned from whichever peer was fetched last, so with several peers at most one can accept it. Safe — a rejection, never an overwrite — and authority and evidence still reach every member, so only the branch converges by relay. Per-peer tracking refs would fix it in varvig. |
 | **No interface registry** (§2.1) | A capability reference already binds to the interface *hash*, which is the part that matters for safety — a ticket, a cell's configuration and a lease must all name the same hash before anything is ordered. What is missing is the registry the hash points into: interfaces published as varvig objects and resolvable by hash. |
 | **No derived reputation** (§2.2) | Capability claims are advisory and standing should be derived from promotion history. Only the agreement-rate metric is derived today, and it is per scope rather than per cell. |
 | **Money is a `float64`** | Amounts accumulate representation error — 1000 − 320 − 355.40 is 44.60000000000002 — and refusals round for display. No decision compares amounts for equality, so nothing turns on it today, but minor units are the right representation for a system that spends money. |
 
-The first three are scope. The fourth is a representation choice worth fixing
-before real money moves through it.
+The first is varvig's to fix. The next two are scope. The last is a
+representation choice worth fixing before real money moves through it.
 
 ## Repository name
 

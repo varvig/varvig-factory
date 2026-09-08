@@ -82,23 +82,31 @@ type Cell struct {
 	Ledger    *budget.Ledger
 	Promoter  *promote.Promoter
 
-	// Upstream is the peer address the *project* replica syncs with. Empty means
-	// a single-cell deployment with no upstream, which is legitimate and not an
-	// error.
-	Upstream string
-	// FactoryUpstream is the peer address the *factory* replica syncs with.
+	// Rendezvous is the set of peers the *project* replica syncs with. Empty
+	// means a single-cell deployment with nothing to sync against, which is
+	// legitimate and not an error.
+	//
+	// The name is not "upstream" because there is no upstream: every member is
+	// equally a rendezvous and none is a coordinator (§3.0). See Peers.
+	Rendezvous Peers
+	// FactoryRendezvous is the set of peers the *coordination* replica syncs
+	// with.
 	//
 	// It is separate because the two repositories are separate: a cell working
-	// three projects dials three project peers and one coordination peer.
+	// three projects dials three project meshes and one coordination mesh.
 	//
-	// There is deliberately no fallback to Upstream. A cell with two real
-	// repositories and only Upstream set would fetch its authority from its
-	// project peer, which is the wrong peer for "what may I spend" — and a
-	// default that is right for one deployment shape and silently wrong for
-	// another is worse than no default. A collapsed deployment sets both fields
-	// to the same address and says so. Empty means this replica has no peer,
-	// which is the single-cell case and not an error.
-	FactoryUpstream string
+	// There is deliberately no fallback to Rendezvous. A cell with two real
+	// repositories and only the project set configured would fetch its authority
+	// from project peers, which are the wrong peers for "what may I spend" — and
+	// a default that is right for one deployment shape and silently wrong for
+	// another is worse than no default. A collapsed deployment names the same
+	// addresses in both sets and says so.
+	FactoryRendezvous Peers
+
+	// Shuffle randomizes the order peers are contacted in. Nil means
+	// math/rand.Shuffle, which is what a cell should use; a test sets it to
+	// fix the order it is asserting about.
+	Shuffle func(n int, swap func(i, j int))
 	// Branch is the branch to fetch and push.
 	Branch string
 	// Checks are the commands that produce evidence.
@@ -416,14 +424,15 @@ func (c *Cell) Once(ctx context.Context) (Report, error) {
 		if err := c.pushFactory(); err != nil {
 			rep.Errors = append(rep.Errors, err.Error())
 		}
-		if err := c.Project.Push(c.Upstream, c.branch()); err != nil {
-			if errors.Is(err, varvigcli.ErrUnreachable) {
-				rep.Offline = true
-			} else {
-				// A refused push is upstream having diverged. The local state is
-				// intact and immutable; the next pass will fetch and reconcile.
-				rep.Errors = append(rep.Errors, "push: "+err.Error())
-			}
+		// A refused push is a peer having diverged. The local state is intact
+		// and immutable; the next pass will fetch and reconcile. With several
+		// peers that refusal is routine — one tracking ref means at most one can
+		// accept a head push — and the reserved namespaces reach every peer
+		// regardless (FEDERATION.md §6), which is what makes the set live.
+		if v := c.visit(c.Rendezvous, "project push", func(addr string) error {
+			return c.Project.Push(addr, c.branch())
+		}); v.unreachable() && len(c.Rendezvous) > 0 {
+			rep.Offline = true
 		}
 	}
 
@@ -484,23 +493,18 @@ func (c *Cell) fetch() bool {
 // syncFactory brings the coordination replica up to date and records what that
 // established about the currency of trust state.
 func (c *Cell) syncFactory() {
-	if c.FactoryUpstream == "" {
+	if len(c.FactoryRendezvous) == 0 {
 		c.sync = authority.Sync{Configured: false}
 		return
 	}
-	if err := c.Factory.Fetch(c.FactoryUpstream, c.branch()); err != nil {
-		// Either way trust state is unconfirmed. Keep any previous successful
-		// sync time: the cell is behind, not amnesiac, and how far behind is
-		// what a max-age bound reads.
+	v := c.visit(c.FactoryRendezvous, "factory fetch", func(addr string) error {
+		return c.Factory.Fetch(addr, c.branch())
+	})
+	if v.unreachable() {
+		// Keep any previous successful sync time: the cell is behind, not
+		// amnesiac, and how far behind is what a max-age bound reads.
 		c.sync.Configured, c.sync.Reachable = true, false
-		if errors.Is(err, varvigcli.ErrUnreachable) {
-			c.logf("factory peer %s unreachable; trust state is stale — the cell keeps working but will not promote (§4.3b)", c.FactoryUpstream)
-			return
-		}
-		// A failure for some other reason also leaves trust unconfirmed.
-		// Treating it as fresh because the error was unfamiliar would be the
-		// wrong way round.
-		c.logf("factory fetch from %s failed: %v", c.FactoryUpstream, err)
+		c.logf("no coordination peer reachable; trust state is stale — the cell keeps working but will not promote (§4.3b)")
 		return
 	}
 	c.sync = authority.Sync{Configured: true, Reachable: true, At: c.now()}
@@ -509,16 +513,15 @@ func (c *Cell) syncFactory() {
 // syncProject brings the project replica up to date and reports whether the cell
 // is offline from it.
 func (c *Cell) syncProject() bool {
-	if c.Upstream == "" {
+	if len(c.Rendezvous) == 0 {
 		return false
 	}
-	if err := c.Project.Fetch(c.Upstream, c.branch()); err != nil {
-		if errors.Is(err, varvigcli.ErrUnreachable) {
-			c.logf("project peer %s unreachable; continuing offline — the cell keeps proposing from the view it has (§5.2)", c.Upstream)
-			return true
-		}
-		c.logf("project fetch from %s failed: %v", c.Upstream, err)
-		return false
+	v := c.visit(c.Rendezvous, "project fetch", func(addr string) error {
+		return c.Project.Fetch(addr, c.branch())
+	})
+	if v.unreachable() {
+		c.logf("no project peer reachable; continuing offline — the cell keeps proposing from the view it has (§5.2)")
+		return true
 	}
 	return false
 }
@@ -1284,17 +1287,15 @@ func (r *casReleaser) Release(contentHash string) error {
 // offline case, and the spend is already durable locally. What it must never do
 // is pass silently, because the lease is the only record that money was spent.
 func (c *Cell) pushFactory() error {
-	if c.FactoryUpstream == "" {
+	if len(c.FactoryRendezvous) == 0 {
 		return nil
 	}
-	err := c.Factory.Push(c.FactoryUpstream, c.branch())
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, varvigcli.ErrUnreachable) {
+	v := c.visit(c.FactoryRendezvous, "factory push", func(addr string) error {
+		return c.Factory.Push(addr, c.branch())
+	})
+	if v.unreachable() {
 		c.sync.Reachable = false
-		c.logf("factory peer %s unreachable on push; spend recorded locally is not yet reported to the overseer", c.FactoryUpstream)
-		return nil
+		c.logf("no coordination peer reachable on push; spend recorded locally is not yet reported to the overseer")
 	}
-	return fmt.Errorf("factory push: %w", err)
+	return nil
 }
