@@ -30,7 +30,7 @@ func offered(t *testing.T, v repos, g authority.Grant, c Capability, deadline in
 
 func TestAConnectorFindsAndTakesWork(t *testing.T) {
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
 
 	// The inbox is derived from repository state, not a queue: a connector that
@@ -61,7 +61,7 @@ func TestTwoConnectorsRacingProduceOneOrder(t *testing.T) {
 	// The whole exclusion mechanism, and it is varvig's ordinary ref CAS rather
 	// than a lock, a lease or a queue.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
 
 	if _, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0); err != nil {
@@ -80,7 +80,7 @@ func TestTwoConnectorsRacingProduceOneOrder(t *testing.T) {
 
 func TestOnlyTheHolderMayReport(t *testing.T) {
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
 	taken, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
 	if err != nil {
@@ -101,14 +101,14 @@ func TestAConnectorReportsAndOnlyTheCellSpends(t *testing.T) {
 	// under the lease. Same containment core gives a bridge, which may sign a
 	// weak attestation and never a strong one.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
 	taken, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	reported, err := Report(v.P, taken, "fab-a", true, "PO-90210", 355.40, "shipped", at.Unix()+5)
+	reported, err := Report(v.P, taken, "fab-a", true, "PO-90210", 35540, "shipped", at.Unix()+5)
 	if err != nil {
 		t.Fatalf("reporting: %v", err)
 	}
@@ -122,8 +122,8 @@ func TestAConnectorReportsAndOnlyTheCellSpends(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if mid.Spent != 0 || mid.Reserved != 320 {
-		t.Fatalf("a connector's report moved money: spent=%g reserved=%g", mid.Spent, mid.Reserved)
+	if mid.Spent != 0 || mid.Reserved != 32000 {
+		t.Fatalf("a connector's report moved money: spent=%s reserved=%s", mid.Spent, mid.Reserved)
 	}
 
 	// The cell settles from the report, at the reported actual.
@@ -139,8 +139,8 @@ func TestAConnectorReportsAndOnlyTheCellSpends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("settling a report: %v", err)
 	}
-	if settled.Reservation.State != StateDone || settled.Lease.Spent != 355.40 || settled.Lease.Reserved != 0 {
-		t.Fatalf("after settlement: state=%q spent=%g reserved=%g",
+	if settled.Reservation.State != StateDone || settled.Lease.Spent != 35540 || settled.Lease.Reserved != 0 {
+		t.Fatalf("after settlement: state=%q spent=%s reserved=%s",
 			settled.Reservation.State, settled.Lease.Spent, settled.Lease.Reserved)
 	}
 }
@@ -150,7 +150,7 @@ func TestALyingConnectorIsBoundedByTheLease(t *testing.T) {
 	// but the lease: an actual beyond the allocation cannot be recorded, so the
 	// exposure of a compromised connector is an amount the overseer chose.
 	c := fabrication(t)
-	v, g := leased(t, 400, 20)
+	v, g := leased(t, 40000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
 	taken, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
 	if err != nil {
@@ -176,7 +176,7 @@ func TestALyingConnectorIsBoundedByTheLease(t *testing.T) {
 		t.Fatal(err)
 	}
 	if after.Spent != 0 {
-		t.Fatalf("spent = %g after a refused settlement", after.Spent)
+		t.Fatalf("spent = %s after a refused settlement", after.Spent)
 	}
 }
 
@@ -184,7 +184,7 @@ func TestAConnectorCannotInventWork(t *testing.T) {
 	// It can only answer a reservation a cell created and an overseer
 	// authorized. There is no call here that makes one.
 	c := fabrication(t)
-	v, _ := leased(t, 1000, 20)
+	v, _ := leased(t, 100000, 20)
 
 	if awaiting, err := Awaiting(v.P, c); err != nil || len(awaiting) != 0 {
 		t.Fatalf("awaiting = %+v (err %v), want nothing before anything is offered", awaiting, err)
@@ -201,7 +201,7 @@ func TestAConnectorThatDoesNotKnowReportsNothing(t *testing.T) {
 	// "We never heard back" is not a report. A connector that guesses is worse
 	// than one that goes quiet, so the shapes that would let it guess are refused.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
 	taken, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
 	if err != nil {
@@ -227,7 +227,7 @@ func TestAnUntakenOfferIsNotAnUnknownOutcome(t *testing.T) {
 	// so nothing has happened — it must not read as an order that may be in
 	// flight, or an operator would escalate on every reservation ever made.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
 
 	if claim.Reservation.Unresolved() {
@@ -245,7 +245,7 @@ func TestAnUntakenOfferIsNotAnUnknownOutcome(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(released) != 1 || lease.Reserved != 0 {
-		t.Fatalf("an expired offer did not return its headroom: released=%d reserved=%g", len(released), lease.Reserved)
+		t.Fatalf("an expired offer did not return its headroom: released=%d reserved=%s", len(released), lease.Reserved)
 	}
 	_ = leaseHash
 }
@@ -254,7 +254,7 @@ func TestTheKeyStaysClaimedEvenForAnUntakenOffer(t *testing.T) {
 	// Releasing the headroom must not release the right to act. Re-offering the
 	// same action would be a second order the moment a slow connector wakes up.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
 	lease, _, _, err := ReleaseExpired(v.F, v.P, claim.Lease, claim.LeaseHash, at.Unix()+7200)
 	if err != nil {
@@ -293,14 +293,14 @@ func TestIntegrationConnectorExchangeAgainstRealCore(t *testing.T) {
 	c := fabrication(t)
 	env := authority.Envelope{
 		Overseer: "overseer-a", SetAt: at.Unix(),
-		Ceilings: []authority.Ceiling{{Capability: c.ID, Spend: 5000, Unit: "EUR", Quantity: 100}},
+		Ceilings: []authority.Ceiling{{Capability: c.ID, Spend: 500000, Unit: "EUR", Quantity: 100}},
 	}
 	if _, err := authority.PublishEnvelope(v.F, env, ""); err != nil {
 		t.Fatal(err)
 	}
 	l := authority.Lease{
 		CellID: "mini-a", Capability: c.ID, Overseer: "overseer-a",
-		Envelope: "1e20abc", Amount: 1000, Unit: "EUR", Quantity: 20, IssuedAt: at.Unix(),
+		Envelope: "1e20abc", Amount: 100000, Unit: "EUR", Quantity: 20, IssuedAt: at.Unix(),
 	}
 	leaseHash, err := authority.PublishLease(v.F, l, "")
 	if err != nil {
@@ -333,7 +333,7 @@ func TestIntegrationConnectorExchangeAgainstRealCore(t *testing.T) {
 		t.Fatal(err)
 	}
 	if pending.Spent != 0 {
-		t.Fatalf("a report moved money against a real core: spent=%g", pending.Spent)
+		t.Fatalf("a report moved money against a real core: spent=%s", pending.Spent)
 	}
 
 	toSettle, err := LoadClaim(v.P, "mini-a", reported.Reservation.Key, pending, mustHash(t, v, "mini-a", reported.Reservation.Key))
@@ -344,8 +344,8 @@ func TestIntegrationConnectorExchangeAgainstRealCore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("settling against a real core: %v", err)
 	}
-	if settled.Reservation.State != StateDone || settled.Lease.Spent != 320 {
-		t.Fatalf("after settlement: state=%q spent=%g", settled.Reservation.State, settled.Lease.Spent)
+	if settled.Reservation.State != StateDone || settled.Lease.Spent != 32000 {
+		t.Fatalf("after settlement: state=%q spent=%s", settled.Reservation.State, settled.Lease.Spent)
 	}
 }
 

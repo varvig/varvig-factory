@@ -843,7 +843,7 @@ Three properties separate a mesh from a fallback list:
 |---|---|
 | **Every member is contacted each pass**, in both directions | Peer B may hold a lease or an attempt A has never seen. Taking A's answer and stopping relies on A to relay the rest — which makes A a coordinator however the config describes it. |
 | **The order is shuffled** | Reserved-ref replication takes what the cell lacks and *reports* rather than overwrites on a conflict, so on a contested claim the peer contacted first is the one whose version is adopted. A fixed order hands that to whoever was typed in first. |
-| **Reached ≠ answered** | varvig's head push uses one tracking ref, so with several peers at most one can accept a head push and the rest are refused every pass. Those peers were reached — authority and evidence arrived, only the branch disagreed. Counting that as unreachable would mark trust stale for a reason unrelated to trust. |
+| **Reached ≠ answered** | A peer can be reached and still refuse something: a head push whose compare-and-swap loses a race, a namespace that would not transfer. Those peers were reached — authority and evidence arrived — and counting that as unreachable would mark trust stale for a reason unrelated to trust. |
 
 The test that matters most runs three real `varvig serve` processes, each
 holding a ticket only it knows about, and asserts the cell ends the pass holding
@@ -851,13 +851,12 @@ all three and having reported its spend to every one of them. Making the
 implementation a fallback list makes it fail with *"a set that stops at the
 first answer is a fallback list, not a mesh"*.
 
-**One varvig limitation remains.** There is one remote-tracking ref per branch,
-not one per peer, so a head push carries a lease learned from whichever peer was
-fetched last; with several peers at most one can accept it. That is safe — a
-rejection, never an overwrite — and since a peer's refused branch no longer
-suppresses the notes and reserved refs travelling alongside it
-(varvig `FEDERATION.md` §6), authority and evidence still reach every member.
-Only the *branch* converges by relay rather than directly.
+Two varvig changes make the set work rather than merely exist: a refused branch
+no longer suppresses the notes and reserved refs travelling alongside it
+(`FEDERATION.md` §6), and remote-tracking refs are per peer, so a push leases
+against the peer it is pushing to rather than whichever peer was fetched last
+(§7). Without the first, authority reached exactly one member; without the
+second, only one member could accept a head push.
 
 ## One namespace root
 
@@ -1043,13 +1042,13 @@ with the contract-level detail.
 
 | Gap | What is missing |
 |---|---|
-| **One tracking ref per branch, not per peer** (varvig) | Not a Factory gap but the one that shapes it: a head push carries a lease learned from whichever peer was fetched last, so with several peers at most one can accept it. Safe — a rejection, never an overwrite — and authority and evidence still reach every member, so only the branch converges by relay. Per-peer tracking refs would fix it in varvig. |
 | **No interface registry** (§2.1) | A capability reference already binds to the interface *hash*, which is the part that matters for safety — a ticket, a cell's configuration and a lease must all name the same hash before anything is ordered. What is missing is the registry the hash points into: interfaces published as varvig objects and resolvable by hash. |
 | **No derived reputation** (§2.2) | Capability claims are advisory and standing should be derived from promotion history. Only the agreement-rate metric is derived today, and it is per scope rather than per cell. |
-| **Money is a `float64`** | Amounts accumulate representation error — 1000 − 320 − 355.40 is 44.60000000000002 — and refusals round for display. No decision compares amounts for equality, so nothing turns on it today, but minor units are the right representation for a system that spends money. |
+| **Compute budget is a `float64`** | The *authority* amounts are integers now; the inference budget is not. It accumulates and drifts the same way, but it bounds regenerable spend, so no refusal there is irreversible and no hold has to round-trip. Converting it for symmetry would be a bigger diff for a much weaker reason. |
+| **One exponent for every currency** | Money formats and parses at two decimal places, right for EUR and USD and wrong for JPY. A display bug for such a currency, never a spend error — the stored integer is whatever was put in it. Modelling the exponent needs currency data this module does not carry. |
 
-The first is varvig's to fix. The next two are scope. The last is a
-representation choice worth fixing before real money moves through it.
+The first two are scope. The last two are bounded representation choices, both
+of which cost a wrong number on a screen rather than a wrong number in a ledger.
 
 ## Repository name
 

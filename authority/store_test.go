@@ -37,7 +37,7 @@ func TestEnvelopeAndLeaseRoundTrip(t *testing.T) {
 
 	// The hash a load hands back is what a later publish CASes against, so a
 	// second publish from a stale read is refused rather than overwriting.
-	l := lease("mini-a", "pcb-fabrication@1", 1000)
+	l := lease("mini-a", "pcb-fabrication@1", 100000)
 	if _, err := PublishLease(v, l, ""); err != nil {
 		t.Fatalf("issuing a lease: %v", err)
 	}
@@ -47,13 +47,13 @@ func TestEnvelopeAndLeaseRoundTrip(t *testing.T) {
 	}
 
 	// Settlement: spend recorded against the value that was read.
-	back.Spent = 320
+	back.Spent = 32000
 	if _, err := PublishLease(v, back, leaseHash); err != nil {
 		t.Fatalf("settling spend: %v", err)
 	}
 	// The same settlement replayed from the same stale hash is refused, which is
 	// what stops two settlements from losing one of the amounts.
-	back.Spent = 400
+	back.Spent = 40000
 	_, err = PublishLease(v, back, leaseHash)
 	if !errors.Is(err, varvigcli.ErrCAS) {
 		t.Fatalf("a stale settlement was accepted or failed wrongly: %v", err)
@@ -80,9 +80,9 @@ func TestMissingEnvelopeIsNotAnEmptyOne(t *testing.T) {
 func TestLeasesAcrossCellsIsWhatExposureNeeds(t *testing.T) {
 	v := fake(t)
 	for _, l := range []Lease{
-		lease("mini-a", "pcb-fabrication@1", 2000),
-		lease("mini-b", "pcb-fabrication@1", 1000),
-		lease("mini-b", "human-contract@1", 500),
+		lease("mini-a", "pcb-fabrication@1", 200000),
+		lease("mini-b", "pcb-fabrication@1", 100000),
+		lease("mini-b", "human-contract@1", 50000),
 	} {
 		if _, err := PublishLease(v, l, ""); err != nil {
 			t.Fatalf("issuing %s: %v", l, err)
@@ -97,7 +97,7 @@ func TestLeasesAcrossCellsIsWhatExposureNeeds(t *testing.T) {
 		t.Fatalf("listed %d leases, want 3", len(all))
 	}
 	exp := Exposure(all)
-	if exp["pcb-fabrication@1"] != 3000 || exp["human-contract@1"] != 500 {
+	if exp["pcb-fabrication@1"] != 300000 || exp["human-contract@1"] != 50000 {
 		t.Fatalf("exposure = %v", exp)
 	}
 
@@ -116,7 +116,7 @@ func TestALeaseUnderTheWrongRefIsReportedNotSummed(t *testing.T) {
 	// to borrow authority. Summing it under the wrong holder would misreport who
 	// can spend what, so it is refused loudly.
 	v := fake(t)
-	l := lease("mini-a", "pcb-fabrication@1", 1000)
+	l := lease("mini-a", "pcb-fabrication@1", 100000)
 	body, err := cell.Canonical(l)
 	if err != nil {
 		t.Fatal(err)
@@ -147,9 +147,9 @@ func TestALeaseUnderTheWrongRefIsReportedNotSummed(t *testing.T) {
 
 func TestReclaimRefusesALeaseWithSpend(t *testing.T) {
 	v := fake(t)
-	l := lease("mini-a", "pcb-fabrication@1", 1000)
+	l := lease("mini-a", "pcb-fabrication@1", 100000)
 	l.ReclaimAfter = now.Unix()
-	l.Spent = 1
+	l.Spent = 100
 	hash, err := PublishLease(v, l, "")
 	if err != nil {
 		t.Fatal(err)

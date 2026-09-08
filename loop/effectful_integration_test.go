@@ -78,21 +78,21 @@ func TestIntegrationEffectfulTicketAgainstRealCore(t *testing.T) {
 
 	env := authority.Envelope{
 		Overseer: "overseer-a", SetAt: effClock.Unix(),
-		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 5000, Unit: "EUR", Quantity: 100}},
+		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 500000, Unit: "EUR", Quantity: 100}},
 	}
 	if _, err := authority.PublishEnvelope(fr, env, ""); err != nil {
 		t.Fatalf("real core refused an envelope: %v", err)
 	}
 	lease := authority.Lease{
 		CellID: "mini-a", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
-		Envelope: "1e20abc", Amount: 1000, Unit: "EUR", Quantity: 20, IssuedAt: effClock.Unix(),
+		Envelope: "1e20abc", Amount: 100000, Unit: "EUR", Quantity: 20, IssuedAt: effClock.Unix(),
 	}
 	if _, err := authority.PublishLease(fr, lease, ""); err != nil {
 		t.Fatalf("real core refused a lease: %v", err)
 	}
 
 	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: iface, Effectful: true}
-	fake := effect.NewFake(capability, 320, "EUR")
+	fake := effect.NewFake(capability, 32000, "EUR")
 	c := &Cell{
 		Capabilities: cell.Capabilities{
 			CellID:  "mini-a",
@@ -131,8 +131,8 @@ func TestIntegrationEffectfulTicketAgainstRealCore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Spent != 320 || after.Reserved != 0 {
-		t.Fatalf("lease against real core: spent=%g reserved=%g", after.Spent, after.Reserved)
+	if after.Spent != 32000 || after.Reserved != 0 {
+		t.Fatalf("lease against real core: spent=%s reserved=%s", after.Spent, after.Reserved)
 	}
 	if pending, err := effect.Pending(pr, "mini-a"); err != nil || len(pending) != 0 {
 		t.Fatalf("pending = %v (err %v), want empty", pending, err)

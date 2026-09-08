@@ -85,9 +85,9 @@ type Reservation struct {
 	Capability string `json:"capability"`
 	Interface  string `json:"interface"`
 
-	Amount   float64 `json:"amount,omitempty"`
-	Unit     string  `json:"unit,omitempty"`
-	Quantity int64   `json:"quantity,omitempty"`
+	Amount   cell.Money `json:"amount_minor,omitempty"`
+	Unit     string     `json:"unit,omitempty"`
+	Quantity int64      `json:"quantity,omitempty"`
 	// AuthorizedBy is the higher principal that authorized this. It is recorded
 	// rather than merely checked, because "who authorized this spend" is the
 	// first question asked about an invoice nobody expected.
@@ -117,7 +117,7 @@ type Reservation struct {
 	// on the reservation so a release cannot be applied twice to the lease.
 	HoldReleased bool `json:"hold_released,omitempty"`
 	// Actual is the settled cost when it differed from the quoted Amount.
-	Actual float64 `json:"actual,omitempty"`
+	Actual cell.Money `json:"actual_minor,omitempty"`
 	// Happened records a connector's claim about the world: true when the effect
 	// occurred, false when the service definitely refused. It is stored rather
 	// than inferred from ExternalRef, so a rejection and a success stay
@@ -154,7 +154,7 @@ func (r Reservation) Open() bool {
 func (r Reservation) String() string {
 	s := fmt.Sprintf("%s %s/%s %s", short(r.Key), r.CellID, r.Capability, r.State)
 	if r.Amount > 0 {
-		s += fmt.Sprintf(" %.2f %s", r.Amount, r.Unit)
+		s += fmt.Sprintf(" %s %s", r.Amount, r.Unit)
 	}
 	if r.ExternalRef != "" {
 		s += " ref=" + r.ExternalRef
@@ -346,7 +346,7 @@ func Reserve(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, req Request, exec
 // actual is what it really cost. Pass 0 to mean "as quoted". A divergence from
 // the quote is recorded rather than absorbed (§7.1): one is noise, a pattern of
 // them is a capability whose quotes cannot be trusted.
-func Settle(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, c Claim, externalRef string, actual float64, at int64) (Claim, error) {
+func Settle(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, c Claim, externalRef string, actual cell.Money, at int64) (Claim, error) {
 	if externalRef == "" {
 		return c, fmt.Errorf("effect: settling %s needs the external reference; a spend nobody can look up is not a settled one", short(c.Reservation.Key))
 	}
@@ -377,7 +377,7 @@ func Settle(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, c Claim, externalR
 	r.State, r.ExternalRef, r.SettledAt, r.HoldReleased = StateDone, externalRef, at, true
 	if actual != r.Amount {
 		r.Actual = actual
-		r.Detail = fmt.Sprintf("quoted %.2f %s, actual %.2f %s", r.Amount, r.Unit, actual, r.Unit)
+		r.Detail = fmt.Sprintf("quoted %s %s, actual %s %s", r.Amount, r.Unit, actual, r.Unit)
 	}
 	hash, err := update(p, r, c.Hash)
 	if err != nil {

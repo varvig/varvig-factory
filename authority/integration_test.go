@@ -64,7 +64,7 @@ func TestIntegrationEnvelopeAndLeaseRefsAreAccepted(t *testing.T) {
 		t.Fatalf("a CAS update against the read value was refused: %v", err)
 	}
 
-	l := lease("mini-a", "pcb-fabrication@1", 1000)
+	l := lease("mini-a", "pcb-fabrication@1", 100000)
 	l.ReclaimAfter = now.Unix()
 	if _, err := PublishLease(v, l, ""); err != nil {
 		t.Fatalf("real core refused a lease ref: %v", err)
@@ -75,7 +75,7 @@ func TestIntegrationEnvelopeAndLeaseRefsAreAccepted(t *testing.T) {
 	}
 
 	// Settlement through a real CAS.
-	held.Spent = 320
+	held.Spent = 32000
 	if _, err := PublishLease(v, held, leaseHash); err != nil {
 		t.Fatalf("settling spend: %v", err)
 	}
@@ -89,11 +89,11 @@ func TestIntegrationEnvelopeAndLeaseRefsAreAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listing leases: %v", err)
 	}
-	if len(all) != 1 || all[0].Spent != 320 {
+	if len(all) != 1 || all[0].Spent != 32000 {
 		t.Fatalf("listed %d leases: %+v", len(all), all)
 	}
-	if got := Exposure(all)["pcb-fabrication@1"]; got != 680 {
-		t.Fatalf("exposure = %g, want 680", got)
+	if got := Exposure(all)["pcb-fabrication@1"]; got != 68000 {
+		t.Fatalf("exposure = %s, want 680.00", got)
 	}
 
 	// Reclaim refuses a lease with spend even against a real core, then collects

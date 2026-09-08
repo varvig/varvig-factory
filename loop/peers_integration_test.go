@@ -139,8 +139,8 @@ func TestIntegrationARealThreePeerMesh(t *testing.T) {
 	// happens to accept a head push.
 	lease := authority.Lease{
 		CellID: "mini-a", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
-		Envelope: "1e20abc", Amount: 1000, Unit: "EUR", Quantity: 20,
-		IssuedAt: c.now().Unix(), Spent: 320,
+		Envelope: "1e20abc", Amount: 100000, Unit: "EUR", Quantity: 20,
+		IssuedAt: c.now().Unix(), Spent: 32000,
 	}
 	if _, err := authority.PublishLease(c.Factory, lease, ""); err != nil {
 		t.Fatal(err)

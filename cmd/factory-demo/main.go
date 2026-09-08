@@ -319,13 +319,13 @@ func run() error {
 	envelope := authority.Envelope{
 		Overseer: "overseer-a", SetAt: clock.Unix(),
 		Ceilings: []authority.Ceiling{{
-			Capability: "pcb-fabrication@1", Spend: 5000, Unit: "EUR", Quantity: 100, RatePerDay: 4,
+			Capability: "pcb-fabrication@1", Spend: 500000, Unit: "EUR", Quantity: 100, RatePerDay: 4,
 		}},
 	}
 	must(envelope.Validate())
 	lease := authority.Lease{
 		CellID: "mini-a", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
-		Envelope: "1e20" + short(third.Change), Amount: 1000, Unit: "EUR", Quantity: 20,
+		Envelope: "1e20" + short(third.Change), Amount: 100000, Unit: "EUR", Quantity: 20,
 		IssuedAt: clock.Unix(), ReclaimAfter: clock.Add(24 * time.Hour).Unix(),
 	}
 	must(authority.CheckExclusive(envelope, []authority.Lease{lease}))
@@ -348,7 +348,7 @@ func run() error {
 	order := effect.Request{
 		Capability: boards, Task: ticket, Attempts: 1,
 		Payload: map[string]any{"gerber": short(third.Change), "quantity": 5},
-		Amount:  320, Quantity: 5, Unit: "EUR",
+		Amount:  32000, Quantity: 5, Unit: "EUR",
 		AuthorizedBy: "overseer-a",
 	}
 	grant := authority.Grant{Envelope: envelope, Lease: &lease}
@@ -370,22 +370,22 @@ func run() error {
 	held := authority.Grant{Envelope: envelope, Lease: &current, LeaseHash: readAt}
 	claim := must1(effect.Reserve(mini.factory, mini.project, order, "mini-a", held, clock.Unix(), 3600))
 	fmt.Printf("  reserved: %s\n", claim.Reservation)
-	fmt.Printf("  the lease now holds %.2f EUR against it, leaving %.2f of %.2f\n",
+	fmt.Printf("  the lease now holds %s EUR against it, leaving %s of %s\n",
 		claim.Lease.Reserved, claim.Lease.Headroom(), claim.Lease.Amount)
 
 	// A second order that fits the allocation but not the remaining headroom is
 	// refused while the first is still outstanding. Counting only settled spend
 	// would wave it through and the two together would exceed the lease.
 	competing := order
-	competing.Task, competing.Amount = ticket+"-b", 800
+	competing.Task, competing.Amount = ticket+"-b", 80000
 	_, tooMuch := effect.Reserve(mini.factory, mini.project, competing, "mini-a",
 		authority.Grant{Envelope: envelope, Lease: &claim.Lease, LeaseHash: claim.LeaseHash}, clock.Unix()+1, 3600)
 	fmt.Printf("  a second 800 EUR order while the first is pending: %v\n", tooMuch != nil)
 
 	// The order goes through, and settlement converts the hold into spend at the
 	// price actually charged rather than the one quoted.
-	claim = must1(effect.Settle(mini.factory, mini.project, claim, "PO-90210", 355.40, clock.Add(time.Minute).Unix()))
-	fmt.Printf("  settled: %.2f EUR spent of %.2f, %.2f left (%s)\n",
+	claim = must1(effect.Settle(mini.factory, mini.project, claim, "PO-90210", 35540, clock.Add(time.Minute).Unix()))
+	fmt.Printf("  settled: %s EUR spent of %s, %s left (%s)\n",
 		claim.Lease.Spent, claim.Lease.Amount, claim.Lease.Headroom(), claim.Reservation.Detail)
 
 	// The same action again is refused by varvig's ordinary ref CAS, and told
@@ -397,7 +397,7 @@ func run() error {
 	// Exposure is what the overseer reasons about, and it is the sum of lease
 	// *headroom*: what is spent is gone, and what is held may already be an order
 	// at the far end. Neither is still allocatable.
-	fmt.Printf("  outstanding exposure for pcb-fabrication@1: %.2f EUR\n",
+	fmt.Printf("  outstanding exposure for pcb-fabrication@1: %s EUR\n",
 		authority.Exposure(must1(authority.Leases(mini.factory, "")))["pcb-fabrication@1"])
 	lease = claim.Lease
 
@@ -406,31 +406,31 @@ func run() error {
 	// reissued lease, because adopting a tighter ceiling can only reduce spend.
 	tightened := envelope
 	tightened.Ceilings = []authority.Ceiling{{
-		Capability: "pcb-fabrication@1", Spend: 400, Unit: "EUR", Quantity: 100, RatePerDay: 4,
+		Capability: "pcb-fabrication@1", Spend: 40000, Unit: "EUR", Quantity: 100, RatePerDay: 4,
 	}}
 	must1(authority.PublishEnvelope(mini.factory, tightened,
 		must1(mini.v.ResolveRef(must1(cell.EnvelopeRef(envelope.Overseer))))))
 	bounded := must1(authority.Grant{Envelope: tightened, Lease: &claim.Lease}.Bounded())
 	fmt.Printf("  --- overseer tightens the envelope to 400 EUR ---\n")
-	fmt.Printf("  the lease still reads %.2f EUR; spendable is now %.2f\n", claim.Lease.Amount, bounded.Headroom())
+	fmt.Printf("  the lease still reads %s EUR; spendable is now %s\n", claim.Lease.Amount, bounded.Headroom())
 
 	// Loosening, by contrast, grants nothing: the minimum is still the lease, so
 	// more headroom needs a new lease the overseer has to write.
 	loosened := envelope
-	loosened.Ceilings = []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 99999, Unit: "EUR"}}
+	loosened.Ceilings = []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 9999900, Unit: "EUR"}}
 	wide := must1(authority.Grant{Envelope: loosened, Lease: &claim.Lease}.Bounded())
-	fmt.Printf("  a loosened envelope leaves it at %.2f: widening needs a new lease\n", wide.Headroom())
+	fmt.Printf("  a loosened envelope leaves it at %s: widening needs a new lease\n", wide.Headroom())
 	envelope = tightened
 
 	// Beyond the lease escalates rather than drawing on the 5000 EUR envelope.
 	// A lease that can be exceeded is advisory, and an advisory exclusive
 	// allocation is a shared one.
 	tooBig := order
-	tooBig.Amount, tooBig.Quantity = 900, 12
+	tooBig.Amount, tooBig.Quantity = 90000, 12
 	lease = claim.Lease
 	beyond := effect.Check(tooBig, "mini-a", authority.Grant{Envelope: envelope, Lease: &lease},
 		disconnected.Sync, func() time.Time { return clock }, 0)
-	fmt.Printf("  a 900 EUR order with %.2f EUR spendable: allowed=%v escalate=%v\n", bounded.Headroom(), beyond.Allowed, beyond.Escalate)
+	fmt.Printf("  a 900 EUR order with %s EUR spendable: allowed=%v escalate=%v\n", bounded.Headroom(), beyond.Allowed, beyond.Escalate)
 	fmt.Println(indent(beyond.Error()))
 
 	// And the cell cannot authorize its own order, holding a promote key or not.
@@ -464,9 +464,9 @@ func run() error {
 	// happened, which is the number every guard in this system is about.
 	must1(authority.PublishLease(micro.factory, authority.Lease{
 		CellID: "micro-b", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
-		Envelope: "1e20abc", Amount: 500, Unit: "EUR", Quantity: 10, IssuedAt: clock.Unix(),
+		Envelope: "1e20abc", Amount: 50000, Unit: "EUR", Quantity: 10, IssuedAt: clock.Unix(),
 	}, ""))
-	fab := effect.NewFake(boards, 180, "EUR")
+	fab := effect.NewFake(boards, 18000, "EUR")
 
 	// Note which cell this is: micro-b, the CPU-local verify/build cell with no
 	// model at all. Authority to spend is a lease, not a GPU.
@@ -490,7 +490,7 @@ func run() error {
 		len(secondPass.Effects), fab.Count())
 
 	settledLease, _ := must2(authority.LoadLease(micro.factory, "micro-b", "pcb-fabrication@1"))
-	fmt.Printf("  micro-b's lease: %.2f of %.2f EUR spent — and micro-b holds no model at all\n",
+	fmt.Printf("  micro-b's lease: %s of %s EUR spent — and micro-b holds no model at all\n",
 		settledLease.Spent, settledLease.Amount)
 
 	section("done")

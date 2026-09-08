@@ -1,6 +1,6 @@
 # The Cell Contract
 
-*Normative. Version 4* — adds rendezvous sets and the repository split (§2.1), authority (§8.1),
+*Normative. Version 5* — counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
 effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
@@ -515,18 +515,18 @@ contains `@` and a ref path component should not carry an alias's punctuation.
 ```json
 { "overseer": "overseer-a", "set_at": 1755820800,
   "ceilings": [
-    { "capability": "pcb-fabrication@1", "spend": 5000, "unit": "EUR",
+    { "capability": "pcb-fabrication@1", "spend_minor": 500000, "unit": "EUR",
       "quantity": 100, "rate_per_day": 4 },
-    { "capability": "human-contract@1",  "spend": 2000, "unit": "EUR" }
+    { "capability": "human-contract@1",  "spend_minor": 200000, "unit": "EUR" }
   ] }
 ```
 
 ```json
 { "cell_id": "mini-a", "capability": "pcb-fabrication@1",
   "overseer": "overseer-a", "envelope": "<envelope object hash>",
-  "amount": 1000, "unit": "EUR", "quantity": 20,
-  "spent": 320, "ordered": 5,
-  "reserved": 400, "reserved_units": 6,
+  "amount_minor": 100000, "unit": "EUR", "quantity": 20,
+  "spent_minor": 32000, "ordered": 5,
+  "reserved_minor": 40000, "reserved_units": 6,
   "issued_at": 1755820800, "reclaim_after": 1755907200 }
 ```
 
@@ -948,14 +948,12 @@ implementation has no branch on the class name, and rendezvous is now a set per
 repository kind (§2.1) rather than a single address — so a factory keeps working
 when any particular member is unreachable.
 
-One limitation remains, and it is varvig's rather than this contract's: there is
-one remote-tracking ref per branch, not one per peer, so a cell's head push
-carries a lease learned from whichever peer it last fetched. With several peers
-at most one can accept a head push and the rest are refused. That is safe — a
-rejection, never an overwrite — and since `FEDERATION.md` §6 the refusal no
-longer suppresses the notes and reserved refs travelling alongside, so authority
-and evidence still reach every member. Only the *branch* converges by relay
-rather than directly.
+Two varvig changes were needed to make that work rather than merely exist: a
+refused branch no longer suppresses the notes and reserved refs travelling
+alongside it (`FEDERATION.md` §6), and remote-tracking refs are per peer, so a
+push leases against the peer it is pushing to rather than whichever peer was
+fetched last (§7). Without the first, authority reached exactly one member of a
+set; without the second, only one member could accept a head push.
 
 **Interfaces are not yet varvig objects.** A capability reference already binds
 to the interface *hash* rather than the alias (§8.2), which is the part that
@@ -968,9 +966,32 @@ derives a cell's standing from its promotion history rather than from what it
 declares about itself. Today only the agreement-rate metric (§9) is derived, and
 it is per scope rather than per cell.
 
-**Money is a float64.** Amounts are `float64` throughout, so ordinary
-arithmetic accumulates representation error: 1000 − 320 − 355.40 is 44.600000000
-00002, and refusal messages round for display rather than being exact. Nothing
-here compares amounts for equality, so no decision turns on it today — but minor
-units (integer cents) are the right representation for a system that spends
-money, and the display rounding is a patch over the symptom.
+**Money is counted in minor units.** Every amount is an integer of the named
+unit's minor units — `"amount_minor": 100000` is €1000.00 — and the keys say
+`_minor` so a reader that has never heard of the encoding cannot silently read
+100000 as a hundred thousand euros. It sees no key, gets zero, and validation
+refuses: loudly wrong beats quietly wrong by a factor of a hundred.
+
+This replaced `float64`, which was not merely imprecise but *incorrect*. Three
+things here are hostile to binary floating point at once: amounts accumulate (a
+lease's spend grows one settlement at a time), round-trips must be exact (a hold
+released must return the lease to precisely where it started), and refusals are
+decided on comparisons (`Lease.Release` refuses when the amount exceeds what is
+held). Holding 0.30 and releasing 0.10 three times had the third release refused
+as a double release — reported as *"releasing 0.1 EUR ... which holds only
+0.1"*, because the formatter rounded both sides to the same string. The mirror
+case left 5.5e-17 reserved: a phantom hold that any "is anything outstanding"
+check reads as yes, permanently.
+
+Formatting and parsing assume the currency has two decimal places. That is right
+for EUR, USD and most others and wrong for JPY, which has none. Modelling the
+exponent per currency is a real thing to do and is deliberately not done here:
+it needs currency data this contract does not carry, and exact arithmetic is
+worth having without it. What it costs today is a display bug for such a
+currency, never a spend error — the stored integer is whatever was put in it.
+
+**Compute budget is still `float64`.** The budget in §8 bounds inference spend,
+which is regenerable: exceeding it wastes money and nothing else. It accumulates
+and drifts the same way, but no refusal there is irreversible and no hold has to
+round-trip, so it is left alone rather than converted for symmetry. The line
+between the two is the one §8.1 already draws.

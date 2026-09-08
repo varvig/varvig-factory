@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"sync"
+
+	"github.com/varvig/varvig-factory/cell"
 )
 
 // Fake is an in-memory Executor for tests and the demo.
@@ -24,7 +26,7 @@ type Fake struct {
 	// Price is what Quote reports. Actual, when non-zero, is what Execute
 	// reports it really cost — the divergence that settlement records.
 	Price    Quote
-	Actual   float64
+	Actual   cell.Money
 	Ref      string
 	QuoteErr error
 	// ExecErr is returned by Execute. Wrap ErrRejected to model a definite
@@ -40,7 +42,7 @@ type Fake struct {
 }
 
 // NewFake returns a fake that quotes amount and succeeds.
-func NewFake(c Capability, amount float64, unit string) *Fake {
+func NewFake(c Capability, amount cell.Money, unit string) *Fake {
 	return &Fake{
 		Capability: c,
 		Price:      Quote{Amount: amount, Unit: unit},
