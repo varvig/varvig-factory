@@ -110,7 +110,7 @@ type Request struct {
 	// actions and two identical ones are the same action.
 	Payload any
 	// Amount and Quantity are what this action will cost and order.
-	Amount   float64
+	Amount   cell.Money
 	Quantity int64
 	Unit     string
 	// AuthorizedBy is the principal that authorized this action, which must be

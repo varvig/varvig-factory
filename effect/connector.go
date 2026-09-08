@@ -166,7 +166,7 @@ func Take(p varvigcli.ProjectRepo, cellID, key, connectorID string, at, deadline
 // a connector that guesses here is worse than one that goes quiet.
 //
 // actual is what it really cost; zero means as quoted.
-func Report(p varvigcli.ProjectRepo, c Claim, connectorID string, happened bool, externalRef string, actual float64, detail string, at int64) (Claim, error) {
+func Report(p varvigcli.ProjectRepo, c Claim, connectorID string, happened bool, externalRef string, actual cell.Money, detail string, at int64) (Claim, error) {
 	r := c.Reservation
 	if r.TakenBy == "" || r.TakenBy != connectorID {
 		return c, fmt.Errorf("%w: %s holds %s, not %q", ErrNotHolder, r.TakenBy, short(r.Key), connectorID)

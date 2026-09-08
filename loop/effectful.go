@@ -51,16 +51,16 @@ type EffectResult struct {
 	// cell has committed the headroom and done everything it can; the effect has
 	// not happened yet.
 	Offered bool
-	Amount  float64
+	Amount  cell.Money
 	Unit    string
 }
 
 func (r EffectResult) String() string {
 	switch {
 	case r.Done:
-		return fmt.Sprintf("%s %s: done ref=%s (%.2f %s)", shortID(r.Task), r.Capability, r.ExternalRef, r.Amount, r.Unit)
+		return fmt.Sprintf("%s %s: done ref=%s (%s %s)", shortID(r.Task), r.Capability, r.ExternalRef, r.Amount, r.Unit)
 	case r.Offered:
-		return fmt.Sprintf("%s %s: offered to a connector (%.2f %s held)", shortID(r.Task), r.Capability, r.Amount, r.Unit)
+		return fmt.Sprintf("%s %s: offered to a connector (%s %s held)", shortID(r.Task), r.Capability, r.Amount, r.Unit)
 	case r.Unresolved:
 		return fmt.Sprintf("%s %s: UNRESOLVED — may have happened, escalating: %s", shortID(r.Task), r.Capability, r.Reason)
 	default:

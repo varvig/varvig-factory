@@ -11,6 +11,8 @@ import (
 
 	"github.com/varvig/varvig-factory/authority"
 	"github.com/varvig/varvig-factory/varvigcli"
+
+	"github.com/varvig/varvig-factory/cell"
 )
 
 // repos is the collapsed pair these tests run against: one Fake serving both
@@ -27,13 +29,13 @@ type repos struct {
 
 // leased sets up a repository with an envelope and one lease for mini-a, and
 // returns the lease with the hash it lives at.
-func leased(t *testing.T, amount float64, quantity int64) (repos, authority.Grant) {
+func leased(t *testing.T, amount cell.Money, quantity int64) (repos, authority.Grant) {
 	t.Helper()
 	fr, pr := varvigcli.Collapsed(varvigcli.NewFake("test"))
 	v := repos{F: fr, P: pr}
 	env := authority.Envelope{
 		Overseer: "overseer-a", SetAt: at.Unix(),
-		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 50000, Unit: "EUR", Quantity: 1000}},
+		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 5000000, Unit: "EUR", Quantity: 1000}},
 	}
 	if _, err := authority.PublishEnvelope(v.F, env, ""); err != nil {
 		t.Fatal(err)
@@ -71,7 +73,7 @@ func acting(t *testing.T, v repos, req Request, cellID string, g authority.Grant
 // before executing is what actually stops the second order.
 func Test11b_ReservationExecutesOnce(t *testing.T) {
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	req := order(t, c)
 
 	claim, err := acting(t, v, req, "mini-a", g, at.Unix(), 3600)
@@ -87,8 +89,8 @@ func Test11b_ReservationExecutesOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("settling: %v", err)
 	}
-	if claim.Lease.Spent != 320 || claim.Lease.Reserved != 0 {
-		t.Fatalf("settlement left the lease at spent=%g reserved=%g, want 320 and 0",
+	if claim.Lease.Spent != 32000 || claim.Lease.Reserved != 0 {
+		t.Fatalf("settlement left the lease at spent=%s reserved=%s, want 320 and 0",
 			claim.Lease.Spent, claim.Lease.Reserved)
 	}
 
@@ -111,7 +113,7 @@ func Test11b_ReservationExecutesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	if held.Reserved != 0 {
-		t.Fatalf("a refused repeat held %g of lease headroom", held.Reserved)
+		t.Fatalf("a refused repeat held %s of lease headroom", held.Reserved)
 	}
 
 	// A genuinely different action is not blocked by it.
@@ -127,16 +129,16 @@ func Test11b_ReservationExecutesOnce(t *testing.T) {
 // check the same headroom, each pass, and together exceed the lease.
 func Test11c_HoldsPreventTwoPendingOrdersExceedingTheLease(t *testing.T) {
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 
 	first := order(t, c)
-	first.Amount, first.Quantity = 700, 5
+	first.Amount, first.Quantity = 70000, 5
 	claim, err := acting(t, v, first, "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatalf("the first order was refused: %v", err)
 	}
-	if claim.Lease.Reserved != 700 || claim.Lease.Headroom() != 300 {
-		t.Fatalf("after holding 700 of 1000 the lease reports reserved=%g headroom=%g",
+	if claim.Lease.Reserved != 70000 || claim.Lease.Headroom() != 30000 {
+		t.Fatalf("after holding 700.00 of 1000.00 the lease reports reserved=%s headroom=%s",
 			claim.Lease.Reserved, claim.Lease.Headroom())
 	}
 
@@ -144,29 +146,29 @@ func Test11c_HoldsPreventTwoPendingOrdersExceedingTheLease(t *testing.T) {
 	// Nothing has settled yet, so a lease that only counted settled spend would
 	// wave this through and the two together would be 1400 of 1000.
 	second := order(t, c)
-	second.Task, second.Amount = "T-1043", 700
+	second.Task, second.Amount = "T-1043", 70000
 	if _, err := Reserve(v.F, v.P, second, "mini-a", after(g, claim), at.Unix()+1, 3600); err == nil {
 		t.Fatal("two pending orders were allowed to exceed the lease together")
 	}
 
 	// One that fits the headroom is fine.
 	third := order(t, c)
-	third.Task, third.Amount, third.Quantity = "T-1044", 300, 2
+	third.Task, third.Amount, third.Quantity = "T-1044", 30000, 2
 	if _, err := Reserve(v.F, v.P, third, "mini-a", after(g, claim), at.Unix()+1, 3600); err != nil {
 		t.Fatalf("an order inside the remaining headroom was refused: %v", err)
 	}
 
 	// The same rule applies to unit counts independently of money: ordering the
 	// last boards cheaply must not unlock a further order.
-	v2, g2 := leased(t, 100000, 10)
+	v2, g2 := leased(t, 10000000, 10)
 	bulk := order(t, c)
-	bulk.Amount, bulk.Quantity = 10, 10
+	bulk.Amount, bulk.Quantity = 1000, 10
 	held, err := acting(t, v2, bulk, "mini-a", g2, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	more := order(t, c)
-	more.Task, more.Amount, more.Quantity = "T-1043", 10, 1
+	more.Task, more.Amount, more.Quantity = "T-1043", 1000, 1
 	if _, err := Reserve(v2.F, v2.P, more, "mini-a", after(g2, held), at.Unix()+1, 3600); err == nil {
 		t.Fatal("a pending order holding every unit still left units to order")
 	}
@@ -177,15 +179,15 @@ func Test11c_HoldsPreventTwoPendingOrdersExceedingTheLease(t *testing.T) {
 // not release the key.
 func Test14_ReservationExpiry(t *testing.T) {
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	req := order(t, c)
 
 	claim, err := acting(t, v, req, "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if claim.Lease.Reserved != 320 {
-		t.Fatalf("reserved = %g, want the quoted 320 held", claim.Lease.Reserved)
+	if claim.Lease.Reserved != 32000 {
+		t.Fatalf("reserved = %s, want the quoted 320 held", claim.Lease.Reserved)
 	}
 
 	// Nothing came back. Before the timeout the headroom stays held: the action
@@ -194,7 +196,7 @@ func Test14_ReservationExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(released) != 0 || lease.Reserved != 320 {
+	if len(released) != 0 || lease.Reserved != 32000 {
 		t.Fatalf("a hold inside its timeout was released: %+v", lease)
 	}
 
@@ -207,8 +209,8 @@ func Test14_ReservationExpiry(t *testing.T) {
 	if len(released) != 1 {
 		t.Fatalf("released %d holds, want 1", len(released))
 	}
-	if lease.Reserved != 0 || lease.Headroom() != 1000 {
-		t.Fatalf("expiry did not return the headroom: reserved=%g headroom=%g", lease.Reserved, lease.Headroom())
+	if lease.Reserved != 0 || lease.Headroom() != 100000 {
+		t.Fatalf("expiry did not return the headroom: reserved=%s headroom=%s", lease.Reserved, lease.Headroom())
 	}
 
 	// But the key does NOT come back. The action may have happened, and letting
@@ -232,7 +234,7 @@ func TestResolvingAnExpiredReservationThatDidHappenStillCharges(t *testing.T) {
 	// The nasty case: the hold was returned on the timer, then the overseer finds
 	// the order really was placed. The money must still leave the lease.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
@@ -255,11 +257,11 @@ func TestResolvingAnExpiredReservationThatDidHappenStillCharges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolving an expired-but-real order: %v", err)
 	}
-	if resolved.Lease.Spent != 320 {
-		t.Fatalf("spent = %g, want 320: the order happened and the lease owes it", resolved.Lease.Spent)
+	if resolved.Lease.Spent != 32000 {
+		t.Fatalf("spent = %s, want 320: the order happened and the lease owes it", resolved.Lease.Spent)
 	}
 	if resolved.Lease.Reserved != 0 {
-		t.Fatalf("reserved = %g, want 0: the hold was already returned", resolved.Lease.Reserved)
+		t.Fatalf("reserved = %s, want 0: the hold was already returned", resolved.Lease.Reserved)
 	}
 }
 
@@ -267,7 +269,7 @@ func TestTheSameCellCannotReserveOneKeyTwice(t *testing.T) {
 	// Create-only is the whole locking mechanism. Two attempts produce one winner
 	// and one refusal, using nothing but varvig's ref CAS.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	req := order(t, c)
 
 	claim, err := acting(t, v, req, "mini-a", g, at.Unix(), 3600)
@@ -281,7 +283,7 @@ func TestTheSameCellCannotReserveOneKeyTwice(t *testing.T) {
 
 func TestReserveRefusesAnotherCellsLease(t *testing.T) {
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	if _, err := Reserve(v.F, v.P, order(t, c), "micro-b", g, at.Unix(), 3600); err == nil {
 		t.Fatal("a cell reserved against a lease held by another cell")
 	}
@@ -298,7 +300,7 @@ func TestPendingIsTheStateThatEscalates(t *testing.T) {
 	// record of the one state that matters: the cell does not know whether the
 	// order was placed.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
@@ -345,8 +347,8 @@ func TestPendingIsTheStateThatEscalates(t *testing.T) {
 	if after.Reservation.State != StateDone || !strings.Contains(after.Reservation.Detail, "overseer-a") {
 		t.Fatalf("the resolution did not record who decided it: %+v", after.Reservation)
 	}
-	if after.Lease.Spent != 320 || after.Lease.Reserved != 0 {
-		t.Fatalf("resolving as happened left the lease at spent=%g reserved=%g", after.Lease.Spent, after.Lease.Reserved)
+	if after.Lease.Spent != 32000 || after.Lease.Reserved != 0 {
+		t.Fatalf("resolving as happened left the lease at spent=%s reserved=%s", after.Lease.Spent, after.Lease.Reserved)
 	}
 	if left, err := Pending(v.P, "mini-a"); err != nil || len(left) != 0 {
 		t.Fatalf("pending = %+v (err %v), want empty after resolution", left, err)
@@ -357,7 +359,7 @@ func TestASettledSpendMustBeLookUpAble(t *testing.T) {
 	// The next question about an unexpected invoice is "which order was it", and
 	// the answer has to be in the record.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
@@ -380,30 +382,30 @@ func TestSettlementRecordsActualAgainstQuoted(t *testing.T) {
 	// whose quotes cannot be trusted, which is worth surfacing rather than
 	// absorbing.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	settled, err := Settle(v.F, v.P, claim, "PO-90210", 355.40, at.Unix()+5)
+	settled, err := Settle(v.F, v.P, claim, "PO-90210", 35540, at.Unix()+5)
 	if err != nil {
 		t.Fatalf("settling above the quote: %v", err)
 	}
-	if settled.Lease.Spent != 355.40 {
-		t.Fatalf("spent = %g, want the actual 355.40 rather than the quoted 320", settled.Lease.Spent)
+	if settled.Lease.Spent != 35540 {
+		t.Fatalf("spent = %s, want the actual 355.40 rather than the quoted 320", settled.Lease.Spent)
 	}
-	if settled.Reservation.Actual != 355.40 || !strings.Contains(settled.Reservation.Detail, "quoted 320") {
+	if settled.Reservation.Actual != 35540 || !strings.Contains(settled.Reservation.Detail, "quoted 320") {
 		t.Fatalf("the divergence was absorbed rather than recorded: %+v", settled.Reservation)
 	}
 
 	// An actual that would push the lease past its allocation is refused: the
 	// lease cannot record a state it says is invalid.
-	v2, g2 := leased(t, 400, 20)
+	v2, g2 := leased(t, 40000, 20)
 	claim2, err := acting(t, v2, order(t, c), "mini-a", g2, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Settle(v2.F, v2.P, claim2, "PO-2", 900, at.Unix()+5); err == nil {
+	if _, err := Settle(v2.F, v2.P, claim2, "PO-2", 90000, at.Unix()+5); err == nil {
 		t.Fatal("an actual beyond the whole lease was recorded without complaint")
 	}
 }
@@ -413,7 +415,7 @@ func TestAFailedActionReleasesItsHoldButKeepsItsKey(t *testing.T) {
 	// but the key stays claimed. Whether to authorize a fresh attempt is a
 	// decision for a higher principal, not a loop behaviour (§6.7 rule 5).
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
@@ -422,7 +424,7 @@ func TestAFailedActionReleasesItsHoldButKeepsItsKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("recording a definite rejection: %v", err)
 	}
-	if failed.Lease.Reserved != 0 || failed.Lease.Spent != 0 || failed.Lease.Headroom() != 1000 {
+	if failed.Lease.Reserved != 0 || failed.Lease.Spent != 0 || failed.Lease.Headroom() != 100000 {
 		t.Fatalf("a rejection did not return the headroom: %+v", failed.Lease)
 	}
 	if _, err := Reserve(v.F, v.P, order(t, c), "mini-a", after(g, failed), at.Unix()+60, 3600); !errors.Is(err, ErrAlreadyReserved) {
@@ -439,7 +441,7 @@ func TestReservationRecordsTheInterfaceHash(t *testing.T) {
 	// A reservation read back years later must still name an unambiguous
 	// contract, even if the alias has since been re-pointed (§2.1).
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
@@ -454,7 +456,7 @@ func TestReservationRecordsTheInterfaceHash(t *testing.T) {
 
 func TestReserveRefusesAMalformedRequest(t *testing.T) {
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	aliasOnly := c
 	aliasOnly.Interface = ""
 	if _, err := Reserve(v.F, v.P, order(t, aliasOnly), "mini-a", g, at.Unix(), 3600); err == nil {
@@ -493,7 +495,7 @@ func TestIntegrationReservationRefsAreAccepted(t *testing.T) {
 
 	l := authority.Lease{
 		CellID: "mini-a", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
-		Envelope: "1e20abc", Amount: 1000, Unit: "EUR", Quantity: 20, IssuedAt: at.Unix(),
+		Envelope: "1e20abc", Amount: 100000, Unit: "EUR", Quantity: 20, IssuedAt: at.Unix(),
 	}
 	leaseHash, err := authority.PublishLease(v.F, l, "")
 	if err != nil {
@@ -501,7 +503,7 @@ func TestIntegrationReservationRefsAreAccepted(t *testing.T) {
 	}
 	env := authority.Envelope{
 		Overseer: "overseer-a", SetAt: at.Unix(),
-		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 50000, Unit: "EUR", Quantity: 1000}},
+		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 5000000, Unit: "EUR", Quantity: 1000}},
 	}
 	if _, err := authority.PublishEnvelope(v.F, env, ""); err != nil {
 		t.Fatalf("real core refused an envelope ref: %v", err)
@@ -514,7 +516,7 @@ func TestIntegrationReservationRefsAreAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("real core refused a reservation ref: %v", err)
 	}
-	if claim.Lease.Reserved != 320 {
+	if claim.Lease.Reserved != 32000 {
 		t.Fatalf("the hold did not reach the lease ref: %+v", claim.Lease)
 	}
 
@@ -530,7 +532,7 @@ func TestIntegrationReservationRefsAreAccepted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("settling against a real core: %v", err)
 	}
-	if settled.Lease.Spent != 320 || settled.Lease.Reserved != 0 {
+	if settled.Lease.Spent != 32000 || settled.Lease.Reserved != 0 {
 		t.Fatalf("settlement against a real core left %+v", settled.Lease)
 	}
 	done, err := Reserve(v.F, v.P, req, "mini-a", after(g, settled), at.Unix()+60, 3600)
@@ -547,10 +549,10 @@ func TestIntegrationReservationRefsAreAccepted(t *testing.T) {
 // effectful action. Loosening does not apply until sync.
 func Test12_EnvelopeTightening(t *testing.T) {
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 
 	// Baseline: the envelope is wide, so the lease is the binding constraint.
-	if bounded, err := g.Bounded(); err != nil || bounded.Headroom() != 1000 {
+	if bounded, err := g.Bounded(); err != nil || bounded.Headroom() != 100000 {
 		t.Fatalf("under a wide envelope, headroom = %v (err %v), want 1000", bounded, err)
 	}
 
@@ -558,20 +560,20 @@ func Test12_EnvelopeTightening(t *testing.T) {
 	// not been reissued anything and its lease still says 1000 — but the
 	// envelope is what the overseer will stand behind now.
 	tight := g.Envelope
-	tight.Ceilings = []authority.Ceiling{{Capability: c.ID, Spend: 200, Unit: "EUR", Quantity: 3}}
+	tight.Ceilings = []authority.Ceiling{{Capability: c.ID, Spend: 20000, Unit: "EUR", Quantity: 3}}
 	tightened := authority.Grant{Envelope: tight, Lease: g.Lease, LeaseHash: g.LeaseHash}
 
 	bounded, err := tightened.Bounded()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bounded.Headroom() != 200 || bounded.QuantityHeadroom() != 3 {
-		t.Fatalf("after tightening: headroom=%g units=%d, want 200 and 3", bounded.Headroom(), bounded.QuantityHeadroom())
+	if bounded.Headroom() != 20000 || bounded.QuantityHeadroom() != 3 {
+		t.Fatalf("after tightening: headroom=%s units=%d, want 200.00 and 3", bounded.Headroom(), bounded.QuantityHeadroom())
 	}
 	// The lease as issued is untouched. Rewriting it would destroy the record of
 	// what the overseer actually committed to and when.
-	if g.Lease.Amount != 1000 {
-		t.Fatalf("the stored lease was rewritten to %g; the allocation record must survive a tightening", g.Lease.Amount)
+	if g.Lease.Amount != 100000 {
+		t.Fatalf("the stored lease was rewritten to %s; the allocation record must survive a tightening", g.Lease.Amount)
 	}
 
 	// The 320 EUR order that was fine a moment ago is now refused — before it
@@ -589,19 +591,19 @@ func Test12_EnvelopeTightening(t *testing.T) {
 		t.Fatal(err)
 	}
 	if stored.Reserved != 0 {
-		t.Fatalf("a refused reservation held %g of headroom", stored.Reserved)
+		t.Fatalf("a refused reservation held %s of headroom", stored.Reserved)
 	}
 
 	// An order inside the tightened ceiling still goes through: tightening is a
 	// lower ceiling, not a freeze.
 	small := order(t, c)
-	small.Amount, small.Quantity = 150, 2
+	small.Amount, small.Quantity = 15000, 2
 	claim, err := Reserve(v.F, v.P, small, "mini-a", tightened, at.Unix(), 3600)
 	if err != nil {
 		t.Fatalf("an order inside the tightened ceiling was refused: %v", err)
 	}
-	if claim.Lease.Amount != 1000 {
-		t.Fatalf("the written lease was the bounded view (%g), not the allocation", claim.Lease.Amount)
+	if claim.Lease.Amount != 100000 {
+		t.Fatalf("the written lease was the bounded view (%s), not the allocation", claim.Lease.Amount)
 	}
 
 	// Tightening applies with NO fresh sync. §4.3b's whole point is that
@@ -617,14 +619,14 @@ func Test12_EnvelopeTightening(t *testing.T) {
 	// because the minimum is still the lease — more headroom needs a new lease,
 	// which only the overseer can write and the cell cannot see without syncing.
 	loose := g.Envelope
-	loose.Ceilings = []authority.Ceiling{{Capability: c.ID, Spend: 999999, Unit: "EUR", Quantity: 9999}}
+	loose.Ceilings = []authority.Ceiling{{Capability: c.ID, Spend: 99999900, Unit: "EUR", Quantity: 9999}}
 	loosened := authority.Grant{Envelope: loose, Lease: g.Lease, LeaseHash: g.LeaseHash}
 	wide, err := loosened.Bounded()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if wide.Amount != 1000 || wide.Quantity != 20 {
-		t.Fatalf("a loosened envelope raised the lease to %g/%d; loosening must require a new lease", wide.Amount, wide.Quantity)
+	if wide.Amount != 100000 || wide.Quantity != 20 {
+		t.Fatalf("a loosened envelope raised the lease to %s/%d; loosening must require a new lease", wide.Amount, wide.Quantity)
 	}
 }
 
@@ -633,7 +635,7 @@ func Test12b_TighteningBelowWhatIsAlreadySpent(t *testing.T) {
 	// spent. That money is gone and is not clawed back — the lease simply has
 	// nothing further to give.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 	claim, err := acting(t, v, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
@@ -644,16 +646,16 @@ func Test12b_TighteningBelowWhatIsAlreadySpent(t *testing.T) {
 	}
 
 	tight := g.Envelope
-	tight.Ceilings = []authority.Ceiling{{Capability: c.ID, Spend: 100, Unit: "EUR"}}
+	tight.Ceilings = []authority.Ceiling{{Capability: c.ID, Spend: 10000, Unit: "EUR"}}
 	bounded, err := authority.Grant{Envelope: tight, Lease: &settled.Lease}.Bounded()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if bounded.Headroom() != 0 {
-		t.Fatalf("headroom = %g, want 0: nothing further is spendable", bounded.Headroom())
+		t.Fatalf("headroom = %s, want 0: nothing further is spendable", bounded.Headroom())
 	}
-	if bounded.Spent != 320 {
-		t.Fatalf("spent = %g, want 320: a tightening does not un-spend money", bounded.Spent)
+	if bounded.Spent != 32000 {
+		t.Fatalf("spent = %s, want 320: a tightening does not un-spend money", bounded.Spent)
 	}
 	if err := bounded.Validate(); err != nil {
 		t.Fatalf("the bounded lease is not a valid state to reason about: %v", err)
@@ -665,10 +667,10 @@ func Test12c_RemovingACapabilityIsTheSharpestTightening(t *testing.T) {
 	// be under. Silence is not permission, so this refuses rather than reading
 	// the absence as unbounded.
 	c := fabrication(t)
-	v, g := leased(t, 1000, 20)
+	v, g := leased(t, 100000, 20)
 
 	empty := g.Envelope
-	empty.Ceilings = []authority.Ceiling{{Capability: "shipping@1", Spend: 100, Unit: "EUR"}}
+	empty.Ceilings = []authority.Ceiling{{Capability: "shipping@1", Spend: 10000, Unit: "EUR"}}
 	revoked := authority.Grant{Envelope: empty, Lease: g.Lease, LeaseHash: g.LeaseHash}
 
 	if _, err := revoked.Bounded(); err == nil {
@@ -706,17 +708,17 @@ func Test12d_TighteningIsNotTheEnforcementMechanism(t *testing.T) {
 	c := fabrication(t)
 	env := authority.Envelope{
 		Overseer: "overseer-a", SetAt: at.Unix(),
-		Ceilings: []authority.Ceiling{{Capability: c.ID, Spend: 3000, Unit: "EUR"}},
+		Ceilings: []authority.Ceiling{{Capability: c.ID, Spend: 300000, Unit: "EUR"}},
 	}
 	// Three cells each holding 2000 against a shared ceiling of 3000. Each one
 	// capping itself at the ceiling still permits 6000 in total — which is
 	// exactly why §6.6 says a shared ceiling cannot be enforced locally, and why
 	// tightening means the overseer not replenishing.
-	var total float64
+	var total cell.Money
 	for _, id := range []string{"mini-a", "mini-b", "micro-c"} {
 		l := authority.Lease{
 			CellID: id, Capability: c.ID, Overseer: "overseer-a",
-			Envelope: "1e20abc", Amount: 2000, Unit: "EUR", IssuedAt: at.Unix(),
+			Envelope: "1e20abc", Amount: 200000, Unit: "EUR", IssuedAt: at.Unix(),
 		}
 		bounded, err := (authority.Grant{Envelope: env, Lease: &l}).Bounded()
 		if err != nil {
@@ -725,14 +727,14 @@ func Test12d_TighteningIsNotTheEnforcementMechanism(t *testing.T) {
 		total += bounded.Headroom()
 	}
 	if total <= env.Ceilings[0].Spend {
-		t.Fatalf("this test is meant to demonstrate that local capping does not bound the sum; total=%g ceiling=%g",
+		t.Fatalf("this test is meant to demonstrate that local capping does not bound the sum; total=%s ceiling=%s",
 			total, env.Ceilings[0].Spend)
 	}
 	// The real bound is the one the overseer chose when issuing: outstanding
 	// leases. CheckExclusive is what refuses to issue them this way.
 	leases := []authority.Lease{
-		{CellID: "mini-a", Capability: c.ID, Overseer: "overseer-a", Envelope: "1e20abc", Amount: 2000, Unit: "EUR", IssuedAt: at.Unix()},
-		{CellID: "mini-b", Capability: c.ID, Overseer: "overseer-a", Envelope: "1e20abc", Amount: 2000, Unit: "EUR", IssuedAt: at.Unix()},
+		{CellID: "mini-a", Capability: c.ID, Overseer: "overseer-a", Envelope: "1e20abc", Amount: 200000, Unit: "EUR", IssuedAt: at.Unix()},
+		{CellID: "mini-b", Capability: c.ID, Overseer: "overseer-a", Envelope: "1e20abc", Amount: 200000, Unit: "EUR", IssuedAt: at.Unix()},
 	}
 	if err := authority.CheckExclusive(env, leases); err == nil {
 		t.Fatal("leases summing past the ceiling were accepted; that is the check that actually bounds exposure")

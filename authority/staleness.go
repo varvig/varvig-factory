@@ -3,6 +3,8 @@ package authority
 import (
 	"fmt"
 	"time"
+
+	"github.com/varvig/varvig-factory/cell"
 )
 
 // Act is a class of thing a cell might do, grouped by what makes it safe rather
@@ -143,7 +145,7 @@ func Permit(act Act, s Sync, now time.Time, maxAge MaxAge, lease *Lease) error {
 		}
 		if lease.Exhausted() {
 			return Refusal{Act: act, Escalate: true, Reason: fmt.Sprintf(
-				"the lease for %s is exhausted (%g of %g %s spent); the cell stops and says so rather than borrowing against the envelope",
+				"the lease for %s is exhausted (%s of %s %s spent); the cell stops and says so rather than borrowing against the envelope",
 				lease.Capability, lease.Spent, lease.Amount, lease.Unit)}
 		}
 		return nil
@@ -157,14 +159,14 @@ func Permit(act Act, s Sync, now time.Time, maxAge MaxAge, lease *Lease) error {
 // Beyond the lease is refused and escalates — it does not fall back to the
 // envelope. Falling back would make the lease advisory, and an advisory
 // exclusive allocation is a shared one.
-func PermitSpend(s Sync, now time.Time, maxAge MaxAge, lease *Lease, amount float64, quantity int64) error {
+func PermitSpend(s Sync, now time.Time, maxAge MaxAge, lease *Lease, amount cell.Money, quantity int64) error {
 	if err := Permit(ActEffectful, s, now, maxAge, lease); err != nil {
 		return err
 	}
 	if amount > 0 && lease.Amount > 0 && amount > lease.Headroom() {
 		return Refusal{Act: ActEffectful, Escalate: true, Reason: fmt.Sprintf(
 			"this action costs %s %s but the lease for %s has %s %s left; beyond the lease escalates rather than drawing on the envelope",
-			money(amount), lease.Unit, lease.Capability, money(lease.Headroom()), lease.Unit)}
+			amount, lease.Unit, lease.Capability, lease.Headroom(), lease.Unit)}
 	}
 	if quantity > 0 {
 		if headroom := lease.QuantityHeadroom(); headroom >= 0 && quantity > headroom {

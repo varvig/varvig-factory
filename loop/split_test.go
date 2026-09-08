@@ -22,7 +22,7 @@ import (
 
 // splitCell is effectCell with the two replicas actually separated: the
 // envelope and lease go to a coordination Fake, the ticket to a project Fake.
-func splitCell(t *testing.T, amount float64) (*Cell, *varvigcli.Fake, *varvigcli.Fake, *effect.Fake) {
+func splitCell(t *testing.T, amount cell.Money) (*Cell, *varvigcli.Fake, *varvigcli.Fake, *effect.Fake) {
 	t.Helper()
 	iface := boardInterface(t)
 	coord, work := varvigcli.NewFake("coordination"), varvigcli.NewFake("project")
@@ -34,7 +34,7 @@ func splitCell(t *testing.T, amount float64) (*Cell, *varvigcli.Fake, *varvigcli
 
 	env := authority.Envelope{
 		Overseer: "overseer-a", SetAt: effClock.Unix(),
-		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 5000, Unit: "EUR", Quantity: 100}},
+		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 500000, Unit: "EUR", Quantity: 100}},
 	}
 	if _, err := authority.PublishEnvelope(fr, env, ""); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func splitCell(t *testing.T, amount float64) (*Cell, *varvigcli.Fake, *varvigcli
 	}
 
 	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: iface, Effectful: true}
-	fake := effect.NewFake(capability, 320, "EUR")
+	fake := effect.NewFake(capability, 32000, "EUR")
 	ledger, err := budget.NewLedger(
 		budget.Budget{InferenceDaily: 10, VerifyConcurrent: 1, StorageGB: 1, AttemptsDefault: 1, PerCallCost: 0.01},
 		filepath.Join(t.TempDir(), "ledger.json"), effClock)
@@ -76,7 +76,7 @@ func splitCell(t *testing.T, amount float64) (*Cell, *varvigcli.Fake, *varvigcli
 // exists in one repository and the ticket in another, and the cell has to reach
 // the right one for each or the order never happens.
 func TestACellSpendsFromTheCoordinationReplica(t *testing.T) {
-	c, coord, work, fake := splitCell(t, 1000)
+	c, coord, work, fake := splitCell(t, 100000)
 
 	res, err := c.performEffect(t.Context(), effectTicket(t, work))
 	if err != nil {
@@ -94,8 +94,8 @@ func TestACellSpendsFromTheCoordinationReplica(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.Spent != 320 || lease.Reserved != 0 {
-		t.Fatalf("lease after settlement: spent=%g reserved=%g, want 320 and 0", lease.Spent, lease.Reserved)
+	if lease.Spent != 32000 || lease.Reserved != 0 {
+		t.Fatalf("lease after settlement: spent=%s reserved=%s, want 320 and 0", lease.Spent, lease.Reserved)
 	}
 
 	// The reservation and the ticket's effect note are in the project repo, and
@@ -126,7 +126,7 @@ func TestACellSpendsFromTheCoordinationReplica(t *testing.T) {
 // overseer sizing a lease, another cell deciding whether this one is equipped to
 // verify its work.
 func TestCapabilitiesArePublishedToTheCoordinationReplica(t *testing.T) {
-	c, coord, work, _ := splitCell(t, 1000)
+	c, coord, work, _ := splitCell(t, 100000)
 	c.Capabilities.Inference = cell.Inference{Tier: cell.TierNone}
 	c.Capabilities.Roles = []cell.Role{cell.RoleBuild}
 
@@ -149,7 +149,7 @@ func TestCapabilitiesArePublishedToTheCoordinationReplica(t *testing.T) {
 // no home cannot know what it may do, so it refuses at startup rather than
 // discovering it at the first order.
 func TestACellWithoutACoordinationReplicaWillNotStart(t *testing.T) {
-	c, _, work, _ := splitCell(t, 1000)
+	c, _, work, _ := splitCell(t, 100000)
 	c.Factory = varvigcli.FactoryRepo{}
 	c.ClaimTTL = time.Minute
 	// Enough configuration to get past the earlier checks, so the refusal under
@@ -171,7 +171,7 @@ func TestACellWithoutACoordinationReplicaWillNotStart(t *testing.T) {
 // allowed_keys, which live in the coordination repo, so it is that peer's
 // reachability that decides it — not the project peer's.
 func TestTrustCurrencyFollowsTheFactoryPeer(t *testing.T) {
-	c, coord, work, _ := splitCell(t, 1000)
+	c, coord, work, _ := splitCell(t, 100000)
 	c.Rendezvous = Peers{"project-peer"}
 	c.FactoryRendezvous = Peers{"factory-peer"}
 	coord.Upstream = varvigcli.NewFake("factory-peer")

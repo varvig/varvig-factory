@@ -37,9 +37,7 @@ package authority
 
 import (
 	"fmt"
-	"math"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -71,9 +69,14 @@ type Envelope struct {
 type Ceiling struct {
 	// Capability is the interface this bounds, e.g. "pcb-fabrication@1".
 	Capability string `json:"capability"`
-	// Spend is the maximum total allocatable, in Unit.
-	Spend float64 `json:"spend,omitempty"`
-	Unit  string  `json:"unit,omitempty"`
+	// Spend is the maximum total allocatable, in the minor units of Unit.
+	//
+	// The JSON key says "minor" because an older reader that has never heard of
+	// this encoding must not silently read 100000 as a hundred thousand euros.
+	// It sees no key, gets zero, and Validate refuses — loudly wrong beats
+	// quietly wrong by a factor of a hundred.
+	Spend cell.Money `json:"spend_minor,omitempty"`
+	Unit  string     `json:"unit,omitempty"`
 	// Quantity is the maximum number of units orderable.
 	Quantity int64 `json:"quantity,omitempty"`
 	// RatePerDay caps actions per day.
@@ -106,7 +109,7 @@ func (e Envelope) Validate() error {
 			return fmt.Errorf("authority: envelope for %s has a negative ceiling on %q", e.Overseer, c.Capability)
 		}
 		if c.Spend > 0 && c.Unit == "" {
-			return fmt.Errorf("authority: ceiling on %q names a spend of %s with no unit", c.Capability, money(c.Spend))
+			return fmt.Errorf("authority: ceiling on %q names a spend of %s with no unit", c.Capability, c.Spend)
 		}
 	}
 	return nil
@@ -141,14 +144,14 @@ type Lease struct {
 	// trusting a later read of a ref that has since moved.
 	Overseer string `json:"overseer"`
 	Envelope string `json:"envelope"`
-	// Amount is the exclusive allocation in Unit; Quantity, when set, is the
-	// unit count allowed.
-	Amount   float64 `json:"amount"`
-	Unit     string  `json:"unit,omitempty"`
-	Quantity int64   `json:"quantity,omitempty"`
+	// Amount is the exclusive allocation in the minor units of Unit; Quantity,
+	// when set, is the unit count allowed.
+	Amount   cell.Money `json:"amount_minor"`
+	Unit     string     `json:"unit,omitempty"`
+	Quantity int64      `json:"quantity,omitempty"`
 	// Spent and Ordered are settled actuals, updated when the cell settles.
-	Spent   float64 `json:"spent,omitempty"`
-	Ordered int64   `json:"ordered,omitempty"`
+	Spent   cell.Money `json:"spent_minor,omitempty"`
+	Ordered int64      `json:"ordered,omitempty"`
 	// Reserved and ReservedUnits are headroom held by reservations that have not
 	// settled yet (§7.1). They are what stops two pending orders from each
 	// passing the headroom check on their own and together exceeding the lease.
@@ -156,9 +159,9 @@ type Lease struct {
 	// Held is not the same as spent: a hold is released if the action is
 	// definitely rejected, or if the reservation expires without an answer. Only
 	// settlement converts a hold into spend.
-	Reserved      float64 `json:"reserved,omitempty"`
-	ReservedUnits int64   `json:"reserved_units,omitempty"`
-	IssuedAt      int64   `json:"issued_at"`
+	Reserved      cell.Money `json:"reserved_minor,omitempty"`
+	ReservedUnits int64      `json:"reserved_units,omitempty"`
+	IssuedAt      int64      `json:"issued_at"`
 	// ReclaimAfter is the stated timeout after which an unspent lease may be
 	// *provisionally* reclaimed (§6.6, stranded leases). It is not an expiry:
 	// the lease stays spendable by its holder past this point, because a cell
@@ -182,12 +185,12 @@ func (l Lease) Validate() error {
 		return fmt.Errorf("authority: lease for %s/%s has a negative amount", l.CellID, l.Capability)
 	}
 	if l.Amount > 0 && l.Unit == "" {
-		return fmt.Errorf("authority: lease for %s/%s allocates %s with no unit", l.CellID, l.Capability, money(l.Amount))
+		return fmt.Errorf("authority: lease for %s/%s allocates %s with no unit", l.CellID, l.Capability, l.Amount)
 	}
 	if l.Spent > l.Amount {
 		// Overspend is not a state to tolerate quietly: it means either a
 		// settlement bug or an action taken outside the lease.
-		return fmt.Errorf("authority: lease for %s/%s has spent %s of %s", l.CellID, l.Capability, money(l.Spent), money(l.Amount))
+		return fmt.Errorf("authority: lease for %s/%s has spent %s of %s", l.CellID, l.Capability, l.Spent, l.Amount)
 	}
 	if l.Ordered > l.Quantity && l.Quantity > 0 {
 		return fmt.Errorf("authority: lease for %s/%s has ordered %d of %d", l.CellID, l.Capability, l.Ordered, l.Quantity)
@@ -197,7 +200,7 @@ func (l Lease) Validate() error {
 		// It means a hold was taken without checking, or a settlement recorded
 		// an actual larger than its hold without the hold being adjusted.
 		return fmt.Errorf("authority: lease for %s/%s has committed %s of %s (%s spent, %s held by reservations)",
-			l.CellID, l.Capability, money(l.Spent+l.Reserved), money(l.Amount), money(l.Spent), money(l.Reserved))
+			l.CellID, l.Capability, l.Spent+l.Reserved, l.Amount, l.Spent, l.Reserved)
 	}
 	if l.Quantity > 0 && l.Ordered+l.ReservedUnits > l.Quantity {
 		return fmt.Errorf("authority: lease for %s/%s has committed %d of %d units (%d ordered, %d held)",
@@ -212,7 +215,7 @@ func (l Lease) Validate() error {
 // Held headroom is subtracted because a pending reservation may already have
 // become a real order at the far end. Treating it as still available is exactly
 // the double-spend the reservation exists to prevent.
-func (l Lease) Headroom() float64 {
+func (l Lease) Headroom() cell.Money {
 	if committed := l.Spent + l.Reserved; committed < l.Amount {
 		return l.Amount - committed
 	}
@@ -292,7 +295,7 @@ func CheckExclusive(env Envelope, leases []Lease) error {
 		}
 
 		cells := map[string]bool{}
-		var totalSpend float64
+		var totalSpend cell.Money
 		var totalQuantity int64
 		for _, l := range held {
 			if cells[l.CellID] {
@@ -309,7 +312,7 @@ func CheckExclusive(env Envelope, leases []Lease) error {
 		}
 		if ceiling.Spend > 0 && totalSpend > ceiling.Spend {
 			return fmt.Errorf("authority: outstanding leases for %q total %s %s against a ceiling of %s %s; the owner's exposure would exceed what they set",
-				capability, money(totalSpend), ceiling.Unit, money(ceiling.Spend), ceiling.Unit)
+				capability, totalSpend, ceiling.Unit, ceiling.Spend, ceiling.Unit)
 		}
 		if ceiling.Quantity > 0 && totalQuantity > ceiling.Quantity {
 			return fmt.Errorf("authority: outstanding leases for %q total %d units against a ceiling of %d",
@@ -325,8 +328,8 @@ func CheckExclusive(env Envelope, leases []Lease) error {
 // This — not the envelope — is the number to reason about (§6.6). The envelope
 // is what *could* be allocated; the sum of leases is what has been, and what
 // cannot be clawed back without reaching each cell.
-func Exposure(leases []Lease) map[string]float64 {
-	out := map[string]float64{}
+func Exposure(leases []Lease) map[string]cell.Money {
+	out := map[string]cell.Money{}
 	for _, l := range leases {
 		out[l.Capability] += l.Headroom()
 	}
@@ -336,7 +339,7 @@ func Exposure(leases []Lease) map[string]float64 {
 // String renders a lease for an operator.
 func (l Lease) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s/%s: %s of %s %s", l.CellID, l.Capability, money(l.Spent), money(l.Amount), l.Unit)
+	fmt.Fprintf(&b, "%s/%s: %s of %s %s", l.CellID, l.Capability, l.Spent, l.Amount, l.Unit)
 	if l.Quantity > 0 {
 		fmt.Fprintf(&b, ", %d of %d units", l.Ordered, l.Quantity)
 	}
@@ -352,13 +355,13 @@ func (l Lease) String() string {
 // Holding before acting is what makes two pending actions safe. Without it each
 // would check the same headroom, pass, and together exceed the lease — and by
 // the time the second invoice arrives the money is gone.
-func (l Lease) Hold(amount float64, quantity int64) (Lease, error) {
+func (l Lease) Hold(amount cell.Money, quantity int64) (Lease, error) {
 	if amount < 0 || quantity < 0 {
 		return l, fmt.Errorf("authority: cannot hold a negative amount on %s/%s", l.CellID, l.Capability)
 	}
 	if amount > 0 && amount > l.Headroom() {
 		return l, fmt.Errorf("authority: holding %s %s on the lease for %s/%s leaves %s; only %s is available",
-			money(amount), l.Unit, l.CellID, l.Capability, money(l.Headroom()-amount), money(l.Headroom()))
+			amount, l.Unit, l.CellID, l.Capability, l.Headroom()-amount, l.Headroom())
 	}
 	if quantity > 0 {
 		if headroom := l.QuantityHeadroom(); headroom >= 0 && quantity > headroom {
@@ -377,13 +380,13 @@ func (l Lease) Hold(amount float64, quantity int64) (Lease, error) {
 // Releasing more than is held is refused rather than clamped: it means two
 // releases for one hold, and silently flooring at zero would hand back headroom
 // that a still-pending action might yet consume.
-func (l Lease) Release(amount float64, quantity int64) (Lease, error) {
+func (l Lease) Release(amount cell.Money, quantity int64) (Lease, error) {
 	if amount < 0 || quantity < 0 {
 		return l, fmt.Errorf("authority: cannot release a negative amount on %s/%s", l.CellID, l.Capability)
 	}
 	if amount > l.Reserved || quantity > l.ReservedUnits {
 		return l, fmt.Errorf("authority: releasing %s %s and %d units on %s/%s, which holds only %s and %d; this is a double release",
-			money(amount), l.Unit, quantity, l.CellID, l.Capability, money(l.Reserved), l.ReservedUnits)
+			amount, l.Unit, quantity, l.CellID, l.Capability, l.Reserved, l.ReservedUnits)
 	}
 	l.Reserved -= amount
 	l.ReservedUnits -= quantity
@@ -398,7 +401,7 @@ func (l Lease) Release(amount float64, quantity int64) (Lease, error) {
 // record it would leave the lease claiming headroom that no longer exists — but
 // it is reported, because a quote that is persistently wrong in one direction is
 // a signal worth surfacing rather than absorbing (§7.1).
-func (l Lease) Convert(held, actual float64, heldUnits, actualUnits int64) (Lease, error) {
+func (l Lease) Convert(held, actual cell.Money, heldUnits, actualUnits int64) (Lease, error) {
 	released, err := l.Release(held, heldUnits)
 	if err != nil {
 		return l, err
@@ -409,7 +412,7 @@ func (l Lease) Convert(held, actual float64, heldUnits, actualUnits int64) (Leas
 	released.Spent += actual
 	released.Ordered += actualUnits
 	if err := released.Validate(); err != nil {
-		return l, fmt.Errorf("settling %s %s against a hold of %s: %w", money(actual), l.Unit, money(held), err)
+		return l, fmt.Errorf("settling %s %s against a hold of %s: %w", actual, l.Unit, held, err)
 	}
 	return released, nil
 }
@@ -533,16 +536,4 @@ func (g Grant) Bounded() (*Lease, error) {
 		return nil, err
 	}
 	return &bounded, nil
-}
-
-// money formats an amount for a message a person reads.
-//
-// Currency in float64 accumulates representation error — 1000 - 320 - 355.40
-// prints as 44.60000000000002 — and a refusal about money that renders like
-// that costs the reader confidence in the number. Formatting is a patch over the
-// display, not over the arithmetic: representing amounts in minor units is the
-// real fix, and it is not this function.
-func money(v float64) string {
-	rounded := math.Round(v*100) / 100
-	return strconv.FormatFloat(rounded, 'f', -1, 64)
 }

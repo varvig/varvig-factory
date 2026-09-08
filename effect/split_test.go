@@ -26,7 +26,7 @@ import (
 // split builds a genuinely two-repository cell: separate coordination and
 // project replicas, with the envelope and lease published to the coordination
 // one.
-func split(t *testing.T, amount float64, quantity int64) (*varvigcli.Fake, *varvigcli.Fake, varvigcli.FactoryRepo, varvigcli.ProjectRepo, authority.Grant) {
+func split(t *testing.T, amount cell.Money, quantity int64) (*varvigcli.Fake, *varvigcli.Fake, varvigcli.FactoryRepo, varvigcli.ProjectRepo, authority.Grant) {
 	t.Helper()
 	coord, work := varvigcli.NewFake("coordination"), varvigcli.NewFake("project")
 	fr := varvigcli.FactoryRepo{Varvig: coord}
@@ -34,7 +34,7 @@ func split(t *testing.T, amount float64, quantity int64) (*varvigcli.Fake, *varv
 
 	env := authority.Envelope{
 		Overseer: "overseer-a", SetAt: at.Unix(),
-		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 50000, Unit: "EUR", Quantity: 1000}},
+		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 5000000, Unit: "EUR", Quantity: 1000}},
 	}
 	if _, err := authority.PublishEnvelope(fr, env, ""); err != nil {
 		t.Fatal(err)
@@ -79,7 +79,7 @@ func only(t *testing.T, prefix string, present, absent *varvigcli.Fake) {
 // Varvig, which compiles fine and puts the whole thing back within one
 // substitution of where it started.
 func TestEachRefLandsInItsOwnRepository(t *testing.T) {
-	coord, work, fr, pr, g := split(t, 1000, 20)
+	coord, work, fr, pr, g := split(t, 100000, 20)
 
 	if _, err := Reserve(fr, pr, order(t, fabrication(t)), "mini-a", g, at.Unix(), 3600); err != nil {
 		t.Fatal(err)
@@ -98,7 +98,7 @@ func TestEachRefLandsInItsOwnRepository(t *testing.T) {
 // paying — the one state nobody can undo. The lease going first means a failure
 // here has changed nothing at all.
 func TestSettleRecordsSpendBeforeTheReservation(t *testing.T) {
-	_, work, fr, pr, g := split(t, 1000, 20)
+	_, work, fr, pr, g := split(t, 100000, 20)
 	claimed, err := Reserve(fr, pr, order(t, fabrication(t)), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +112,7 @@ func TestSettleRecordsSpendBeforeTheReservation(t *testing.T) {
 	// write — the cause does not matter, only that the lease cannot be written.
 	fr.Varvig.(*varvigcli.Fake).RefuseWrites = errors.New("coordination replica is unwritable")
 
-	if _, err := Settle(fr, pr, claimed, "PO-1", 320, at.Unix()); err == nil {
+	if _, err := Settle(fr, pr, claimed, "PO-1", 32000, at.Unix()); err == nil {
 		t.Fatal("settling with an unwritable coordination replica must fail, not proceed to mark the reservation done")
 	}
 
@@ -135,7 +135,7 @@ func TestSettleRecordsSpendBeforeTheReservation(t *testing.T) {
 // coordination replica leaves the reservation open rather than marking it failed
 // against a hold that was never returned.
 func TestReleaseIsAlsoLeaseFirst(t *testing.T) {
-	_, _, fr, pr, g := split(t, 1000, 20)
+	_, _, fr, pr, g := split(t, 100000, 20)
 	claimed, err := Reserve(fr, pr, order(t, fabrication(t)), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +166,7 @@ func TestReleaseIsAlsoLeaseFirst(t *testing.T) {
 // correct. It is the deliberate trade: this direction is recoverable, and the
 // reverse — a settled record against an unpaid lease — is not.
 func TestAnUnwritableProjectReplicaOverReportsSpend(t *testing.T) {
-	_, work, fr, pr, g := split(t, 1000, 20)
+	_, work, fr, pr, g := split(t, 100000, 20)
 	claimed, err := Reserve(fr, pr, order(t, fabrication(t)), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
@@ -177,18 +177,18 @@ func TestAnUnwritableProjectReplicaOverReportsSpend(t *testing.T) {
 	}
 	work.RefuseWrites = errors.New("project replica is unwritable")
 
-	if _, err := Settle(fr, pr, claimed, "PO-1", 320, at.Unix()); err == nil {
+	if _, err := Settle(fr, pr, claimed, "PO-1", 32000, at.Unix()); err == nil {
 		t.Fatal("a failed reservation write must be reported, not swallowed")
 	}
 	lease, _, err := authority.LoadLease(fr, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.Spent != 320 {
-		t.Fatalf("lease spent = %g, want 320 — the spend must be durable even when the reservation write fails", lease.Spent)
+	if lease.Spent != 32000 {
+		t.Fatalf("lease spent = %s, want 320.00 — the spend must be durable even when the reservation write fails", lease.Spent)
 	}
 	if lease.Reserved != 0 {
-		t.Fatalf("lease reserved = %g, want 0 — the hold was converted", lease.Reserved)
+		t.Fatalf("lease reserved = %s, want 0 — the hold was converted", lease.Reserved)
 	}
 }
 
@@ -201,7 +201,7 @@ func TestAnUnwritableProjectReplicaOverReportsSpend(t *testing.T) {
 // same repository as the reservation, so "which repository holds the authority"
 // would never be a question with an answer.
 func TestAReservationCannotBeSettledAgainstAnotherRepositorysLease(t *testing.T) {
-	_, _, fr, pr, g := split(t, 1000, 20)
+	_, _, fr, pr, g := split(t, 100000, 20)
 	claimed, err := Reserve(fr, pr, order(t, fabrication(t)), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +213,7 @@ func TestAReservationCannotBeSettledAgainstAnotherRepositorysLease(t *testing.T)
 
 	// A second factory's coordination replica, which has never issued this lease.
 	stranger := varvigcli.FactoryRepo{Varvig: varvigcli.NewFake("someone-elses-factory")}
-	if _, err := Settle(stranger, pr, claimed, "PO-1", 320, at.Unix()); err == nil {
+	if _, err := Settle(stranger, pr, claimed, "PO-1", 32000, at.Unix()); err == nil {
 		t.Fatal("spend was settled against a coordination replica that never issued the lease")
 	}
 }
@@ -256,14 +256,14 @@ func TestIntegrationTwoRealRepositoriesKeepTheirOwnRefs(t *testing.T) {
 	c := fabrication(t)
 	env := authority.Envelope{
 		Overseer: "overseer-a", SetAt: at.Unix(),
-		Ceilings: []authority.Ceiling{{Capability: c.ID, Spend: 5000, Unit: "EUR", Quantity: 100}},
+		Ceilings: []authority.Ceiling{{Capability: c.ID, Spend: 500000, Unit: "EUR", Quantity: 100}},
 	}
 	if _, err := authority.PublishEnvelope(fr, env, ""); err != nil {
 		t.Fatalf("the coordination repo refused an envelope: %v", err)
 	}
 	l := authority.Lease{
 		CellID: "mini-a", Capability: c.ID, Overseer: "overseer-a",
-		Envelope: "1e20abc", Amount: 1000, Unit: "EUR", Quantity: 20, IssuedAt: at.Unix(),
+		Envelope: "1e20abc", Amount: 100000, Unit: "EUR", Quantity: 20, IssuedAt: at.Unix(),
 	}
 	leaseHash, err := authority.PublishLease(fr, l, "")
 	if err != nil {
@@ -279,7 +279,7 @@ func TestIntegrationTwoRealRepositoriesKeepTheirOwnRefs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Settle(fr, pr, claimed, "PO-1", 320, at.Unix()+60); err != nil {
+	if _, err := Settle(fr, pr, claimed, "PO-1", 32000, at.Unix()+60); err != nil {
 		t.Fatalf("Settle across two real repositories: %v", err)
 	}
 
@@ -289,8 +289,8 @@ func TestIntegrationTwoRealRepositoriesKeepTheirOwnRefs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spent.Spent != 320 || spent.Reserved != 0 {
-		t.Fatalf("lease in the coordination repo: spent=%g reserved=%g, want 320 and 0", spent.Spent, spent.Reserved)
+	if spent.Spent != 32000 || spent.Reserved != 0 {
+		t.Fatalf("lease in the coordination repo: spent=%s reserved=%s, want 320.00 and 0", spent.Spent, spent.Reserved)
 	}
 	leaseRef, err := cell.LeaseRef("mini-a", c.ID)
 	if err != nil {

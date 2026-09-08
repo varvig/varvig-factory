@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/varvig/varvig-factory/cell"
 )
 
 // The executor seam: the one place Factory touches an external world that
@@ -33,9 +35,9 @@ type Quote struct {
 	// Amount and Quantity are what the action will cost and order. Amount may
 	// still differ from the invoice — a quote is a quote — which is why
 	// settlement records the actual (§7.1).
-	Amount   float64 `json:"amount"`
-	Quantity int64   `json:"quantity,omitempty"`
-	Unit     string  `json:"unit"`
+	Amount   cell.Money `json:"amount_minor"`
+	Quantity int64      `json:"quantity,omitempty"`
+	Unit     string     `json:"unit"`
 	// Detail is anything the operator should see before the money leaves:
 	// lead time, a line-item breakdown, a substitution the vendor made.
 	Detail string `json:"detail,omitempty"`
@@ -49,8 +51,8 @@ type Outcome struct {
 	ExternalRef string `json:"external_ref"`
 	// Actual is what it really cost, when that differs from the quote. Zero
 	// means "as quoted".
-	Actual float64 `json:"actual,omitempty"`
-	Detail string  `json:"detail,omitempty"`
+	Actual cell.Money `json:"actual_minor,omitempty"`
+	Detail string     `json:"detail,omitempty"`
 }
 
 // Executor performs effectful actions for one or more capabilities.

@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -274,4 +275,78 @@ func relPath(root, path string) string {
 		return path
 	}
 	return filepath.ToSlash(rel)
+}
+
+// TestNoFloatingPointMoney is the third prohibition, and it earned its place by
+// being violated.
+//
+// Amounts were float64 throughout, which is not merely imprecise here. Three
+// things in the authority path are hostile to binary floating point at once:
+// amounts accumulate, holds must round-trip to exactly where they started, and
+// refusals are decided on comparisons. Holding 0.30 and releasing 0.10 three
+// times had the third release refused as a double release — and the message said
+// "releasing 0.1 EUR ... which holds only 0.1", because the formatter rounded
+// both sides to the same string.
+//
+// A reviewer will not catch the next `Amount float64`: it looks exactly like the
+// obvious way to write it, and the test that would fail is one nobody thought to
+// write. So the guard is structural — no field or method named for money may be
+// a float — and budget/ is exempt because it bounds regenerable spend, where no
+// refusal is irreversible and no hold round-trips (CELL.md §8 versus §8.1).
+func TestNoFloatingPointMoney(t *testing.T) {
+	root := moduleRoot(t)
+	files := goFiles(t, root, "budget", "inference")
+
+	// Names that mean money here. Quantity, Ordered and the unit counts are
+	// deliberately absent: those are counts, and integers already.
+	moneyNames := map[string]bool{
+		"Amount": true, "Spend": true, "Spent": true, "Reserved": true,
+		"Actual": true, "Headroom": true,
+	}
+	isFloat := func(e ast.Expr) bool {
+		id, ok := e.(*ast.Ident)
+		return ok && (id.Name == "float64" || id.Name == "float32")
+	}
+
+	for _, path := range files {
+		fset := token.NewFileSet()
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		where := func(p token.Pos) string {
+			r, rerr := filepath.Rel(root, path)
+			if rerr != nil {
+				r = path
+			}
+			return r + ":" + strconv.Itoa(fset.Position(p).Line)
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.Field:
+				if !isFloat(v.Type) {
+					return true
+				}
+				for _, name := range v.Names {
+					if moneyNames[name.Name] {
+						t.Errorf("%s: %s is money and must not be a float; count minor units (cell.Money)",
+							where(name.Pos()), name.Name)
+					}
+				}
+			case *ast.FuncDecl:
+				// A method named for money returning a float is the same
+				// mistake wearing a different hat — Headroom() was one.
+				if v.Type.Results == nil || !moneyNames[v.Name.Name] {
+					return true
+				}
+				for _, res := range v.Type.Results.List {
+					if isFloat(res.Type) {
+						t.Errorf("%s: %s returns a float; money is counted in minor units (cell.Money)",
+							where(v.Pos()), v.Name.Name)
+					}
+				}
+			}
+			return true
+		})
+	}
 }

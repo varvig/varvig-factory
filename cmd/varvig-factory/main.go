@@ -604,7 +604,7 @@ func cmdAuthority(args []string) error {
 		if env, ok := envelopes[l.Overseer]; ok && l.Tightened(env) {
 			tightenedAny = true
 			if bounded, err := (authority.Grant{Envelope: env, Lease: &l}).Bounded(); err == nil {
-				line += fmt.Sprintf("  [envelope tightened: %.4g %s spendable]", bounded.Headroom(), l.Unit)
+				line += fmt.Sprintf("  [envelope tightened: %s %s spendable]", bounded.Headroom(), l.Unit)
 			} else {
 				line += fmt.Sprintf("  [envelope no longer bounds this: %v]", err)
 			}
@@ -628,7 +628,7 @@ func cmdAuthority(args []string) error {
 	}
 	exposure := authority.Exposure(leases)
 	for _, capability := range sortedKeys(exposure) {
-		fmt.Printf("  %-28s %.4g\n", capability, exposure[capability])
+		fmt.Printf("  %-28s %s\n", capability, exposure[capability])
 	}
 
 	for _, overseer := range sortedKeys(overseers) {
@@ -642,7 +642,7 @@ func cmdAuthority(args []string) error {
 		}
 		fmt.Printf("\nenvelope %s (ceilings, shared across every cell under it)\n", overseer)
 		for _, c := range env.Ceilings {
-			fmt.Printf("  %-28s %.4g %s", c.Capability, c.Spend, c.Unit)
+			fmt.Printf("  %-28s %s %s", c.Capability, c.Spend, c.Unit)
 			if c.Quantity > 0 {
 				fmt.Printf("  qty %d", c.Quantity)
 			}

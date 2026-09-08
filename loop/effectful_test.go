@@ -37,7 +37,7 @@ func boardInterface(t *testing.T) string {
 
 // effectCell builds a cell equipped to order boards: the capability declared, a
 // lease held, an envelope above it, and a fake executor.
-func effectCell(t *testing.T, amount float64) (*Cell, *varvigcli.Fake, *effect.Fake) {
+func effectCell(t *testing.T, amount cell.Money) (*Cell, *varvigcli.Fake, *effect.Fake) {
 	t.Helper()
 	iface := boardInterface(t)
 	v := varvigcli.NewFake("mini-a")
@@ -47,7 +47,7 @@ func effectCell(t *testing.T, amount float64) (*Cell, *varvigcli.Fake, *effect.F
 
 	env := authority.Envelope{
 		Overseer: "overseer-a", SetAt: effClock.Unix(),
-		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 5000, Unit: "EUR", Quantity: 100}},
+		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 500000, Unit: "EUR", Quantity: 100}},
 	}
 	if _, err := authority.PublishEnvelope(fr, env, ""); err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func effectCell(t *testing.T, amount float64) (*Cell, *varvigcli.Fake, *effect.F
 	}
 
 	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: iface, Effectful: true}
-	fake := effect.NewFake(capability, 320, "EUR")
+	fake := effect.NewFake(capability, 32000, "EUR")
 	// A ledger, because Once consults it for every ticket — including, as a
 	// separate test asserts, effectful ones it must not gate.
 	ledger, err := budget.NewLedger(
@@ -101,7 +101,7 @@ func effectTicket(t *testing.T, v *varvigcli.Fake) claim.Ticket {
 }
 
 func TestATicketCanOrderAThing(t *testing.T) {
-	c, v, fake := effectCell(t, 1000)
+	c, v, fake := effectCell(t, 100000)
 	res, err := c.performEffect(context.Background(), effectTicket(t, v))
 	if err != nil {
 		t.Fatalf("performing the effect: %v", err)
@@ -121,8 +121,8 @@ func TestATicketCanOrderAThing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.Spent != 320 || lease.Reserved != 0 {
-		t.Fatalf("lease after settlement: spent=%g reserved=%g, want 320 and 0", lease.Spent, lease.Reserved)
+	if lease.Spent != 32000 || lease.Reserved != 0 {
+		t.Fatalf("lease after settlement: spent=%s reserved=%s, want 320 and 0", lease.Spent, lease.Reserved)
 	}
 
 	// And the ticket itself records what it cost, so the question is answerable
@@ -139,7 +139,7 @@ func TestATicketCanOrderAThing(t *testing.T) {
 func TestTheSameTicketNeverOrdersTwice(t *testing.T) {
 	// The property everything else is in service of. A second pass over the same
 	// ticket — a restart, a re-observed ticket, a rerun — must not re-order.
-	c, v, fake := effectCell(t, 1000)
+	c, v, fake := effectCell(t, 100000)
 	ticket := effectTicket(t, v)
 
 	first, err := c.performEffect(context.Background(), ticket)
@@ -163,7 +163,7 @@ func TestAnUnknownOutcomeStaysPendingAndEscalates(t *testing.T) {
 	// The case that matters most: the request left and nothing came back. The
 	// cell does not know whether the order was placed, and every wrong answer
 	// here is expensive.
-	c, v, fake := effectCell(t, 1000)
+	c, v, fake := effectCell(t, 100000)
 	fake.ExecErr = errors.New("connection reset after the request was sent")
 
 	res, err := c.performEffect(context.Background(), effectTicket(t, v))
@@ -185,8 +185,8 @@ func TestAnUnknownOutcomeStaysPendingAndEscalates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if lease.Reserved != 320 {
-		t.Fatalf("reserved = %g, want the hold still standing at 320", lease.Reserved)
+	if lease.Reserved != 32000 {
+		t.Fatalf("reserved = %s, want the hold still standing at 320", lease.Reserved)
 	}
 	// And the cell does not try again on the next pass.
 	if _, err := c.performEffect(context.Background(), effectTicket(t, v)); err != nil {
@@ -200,7 +200,7 @@ func TestAnUnknownOutcomeStaysPendingAndEscalates(t *testing.T) {
 func TestADefiniteRejectionReleasesTheHold(t *testing.T) {
 	// "The vendor said no" and "we never heard back" lead to opposite decisions,
 	// and only the first may return the money.
-	c, v, fake := effectCell(t, 1000)
+	c, v, fake := effectCell(t, 100000)
 	fake.ExecErr = fmt.Errorf("%w: layer count not supported", effect.ErrRejected)
 
 	res, err := c.performEffect(context.Background(), effectTicket(t, v))
@@ -215,7 +215,7 @@ func TestADefiniteRejectionReleasesTheHold(t *testing.T) {
 		t.Fatal(err)
 	}
 	if lease.Reserved != 0 || lease.Spent != 0 {
-		t.Fatalf("a rejection left the lease at reserved=%g spent=%g", lease.Reserved, lease.Spent)
+		t.Fatalf("a rejection left the lease at reserved=%s spent=%s", lease.Reserved, lease.Spent)
 	}
 	// Nothing pending: a confirmed rejection is resolved, and listing it as
 	// unknown would bury the ones that really are.
@@ -234,7 +234,7 @@ func TestADefiniteRejectionReleasesTheHold(t *testing.T) {
 func TestAQuoteBeyondTheLeaseNeverReachesTheExecutor(t *testing.T) {
 	// The refusal has to land before Execute, because after it the money is gone
 	// regardless of what any check says.
-	c, v, fake := effectCell(t, 100) // lease of 100 against a quote of 320
+	c, v, fake := effectCell(t, 10000) // lease of 100 against a quote of 320
 	res, err := c.performEffect(context.Background(), effectTicket(t, v))
 	if err != nil {
 		t.Fatal(err)
@@ -254,13 +254,13 @@ func TestAQuoteBeyondTheLeaseNeverReachesTheExecutor(t *testing.T) {
 		t.Fatal(err)
 	}
 	if lease.Reserved != 0 {
-		t.Fatalf("a refused action held %g", lease.Reserved)
+		t.Fatalf("a refused action held %s", lease.Reserved)
 	}
 }
 
 func TestACellCannotAuthorizeItsOwnOrderThroughTheLoop(t *testing.T) {
 	// §9.15 at the level that matters: not the library call, the wired cell.
-	c, v, fake := effectCell(t, 1000)
+	c, v, fake := effectCell(t, 100000)
 	c.EffectAuthorizedBy = "mini-a"
 
 	res, err := c.performEffect(context.Background(), effectTicket(t, v))
@@ -287,10 +287,10 @@ func TestACellCannotAuthorizeItsOwnOrderThroughTheLoop(t *testing.T) {
 func TestATightenedEnvelopeStopsTheLoopOrdering(t *testing.T) {
 	// §9.12 through the wired cell: the lease is untouched and still says 1000,
 	// but the overseer has narrowed what they will stand behind.
-	c, v, fake := effectCell(t, 1000)
+	c, v, fake := effectCell(t, 100000)
 	tight := authority.Envelope{
 		Overseer: "overseer-a", SetAt: effClock.Unix(),
-		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 50, Unit: "EUR", Quantity: 100}},
+		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 5000, Unit: "EUR", Quantity: 100}},
 	}
 	hash, err := v.ResolveRef(cell.EnvelopePrefix + "overseer-a")
 	if err != nil {
@@ -312,7 +312,7 @@ func TestATightenedEnvelopeStopsTheLoopOrdering(t *testing.T) {
 func TestACellWithNoExecutorDeclinesAndSaysSo(t *testing.T) {
 	// The normal case for almost every cell. It must be a legible refusal, not a
 	// crash and not silence.
-	c, v, _ := effectCell(t, 1000)
+	c, v, _ := effectCell(t, 100000)
 	c.Executors = nil
 
 	res, err := c.performEffect(context.Background(), effectTicket(t, v))
@@ -332,7 +332,7 @@ func TestACellWithNoExecutorDeclinesAndSaysSo(t *testing.T) {
 }
 
 func TestGrantsNeedBothALeaseAndAnExecutor(t *testing.T) {
-	c, v, _ := effectCell(t, 1000)
+	c, v, _ := effectCell(t, 100000)
 	if grants := c.effectGrants(); len(grants) != 1 {
 		t.Fatalf("a fully equipped cell reported %d grants, want 1", len(grants))
 	}
@@ -369,7 +369,7 @@ func TestASecondPassDoesNotEvenRequote(t *testing.T) {
 	// before it: without a record of prior action the claim policy re-claims
 	// every time, and for a quoted capability that means calling the vendor's
 	// pricing API on every pass, forever.
-	c, v, fake := effectCell(t, 1000)
+	c, v, fake := effectCell(t, 100000)
 	ticket := effectTicket(t, v)
 
 	if c.priorEffect(ticket) != 0 {
@@ -413,7 +413,7 @@ func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
 	// takes and reports, and a later pass settles. The connector here is just
 	// test code calling the protocol — which is the point, since a real one is a
 	// separate process doing exactly this.
-	c, v, fake := effectCell(t, 1000)
+	c, v, fake := effectCell(t, 100000)
 	iface := boardInterface(t)
 	c.Connectors = map[string]bool{iface: true}
 
@@ -433,8 +433,8 @@ func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if held.Reserved != 320 {
-		t.Fatalf("reserved = %g at the offer, want 320", held.Reserved)
+	if held.Reserved != 32000 {
+		t.Fatalf("reserved = %s at the offer, want 320", held.Reserved)
 	}
 
 	// A connector, elsewhere.
@@ -447,7 +447,7 @@ func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := effect.Report(c.Project, taken, "fab-connector", true, "PO-77", 341.20, "2 layer", effClock.Unix()+60); err != nil {
+	if _, err := effect.Report(c.Project, taken, "fab-connector", true, "PO-77", 34120, "2 layer", effClock.Unix()+60); err != nil {
 		t.Fatal(err)
 	}
 
@@ -471,8 +471,8 @@ func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after.Spent != 341.20 || after.Reserved != 0 {
-		t.Fatalf("after settlement: spent=%g reserved=%g", after.Spent, after.Reserved)
+	if after.Spent != 34120 || after.Reserved != 0 {
+		t.Fatalf("after settlement: spent=%s reserved=%s", after.Spent, after.Reserved)
 	}
 	// And it does not settle twice on the pass after that.
 	again, err := c.Once(context.Background())
