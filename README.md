@@ -307,7 +307,7 @@ versus stale.**
 | | Envelope | Lease |
 |---|---|---|
 | What it is | a **shared ceiling** across every cell under one overseer | an **exclusive allocation** to one cell |
-| Ref | `refs/envelopes/<overseer-id>` | `refs/leases/<cell-id>/<capability>` |
+| Ref | `refs/factory/envelopes/<overseer-id>` | `refs/factory/leases/<cell-id>/<capability>` |
 | Enforceable from a stale view? | no — another cell may have spent it | yes — nobody else can spend it |
 | Spendable offline | no | **yes, indefinitely** |
 
@@ -523,7 +523,7 @@ executes and everyone else is refused — **before** the effect is attempted, an
 the same step holds the lease headroom for it:
 
 ```
-reserve  ->  refs/reservations/<cell-id>/<key>  = pending
+reserve  ->  refs/factory/reservations/<cell-id>/<key>  = pending
             +  the lease holds the quoted amount
 execute  ->  the external effect
 settle   ->  done, with the far end's own order number
@@ -759,6 +759,32 @@ me a circuit board" by writing code is the failure mode that rule exists to
 prevent, so the requirement survives with the reason attached and the ticket is
 skipped rather than reinterpreted.
 
+## One namespace root
+
+Every Factory ref nests under `refs/factory/` — capabilities, attempts, claims,
+envelopes, leases, reservations. The reason is that the *shapes* are generic and
+the *semantics* are not: any multi-worker system wants something called a claim,
+but a Factory claim is advisory, expiring, never exclusive, and says nothing at
+all across a partition. A system that reasonably made claims exclusive would be
+writing a different meaning under the same name, and no reader could tell them
+apart.
+
+That collision has already happened once between these two projects: varvig's
+speculation store calls its candidates "attempt-states", stored as files under
+`.varvig/spec/`, while a Factory attempt is a ref with different immutability
+rules. Two concepts, one word.
+
+**What makes these semantics reusable is the contract being written down, not
+the prefix being shared.** Another layer implementing leases under its own root
+has benefited from [CELL.md §8.1](./CELL.md); one writing into this root with its
+own lease model has created a hazard. varvig's core reserves the same root and
+asserts the nesting from its side, and a test here asserts it from this one — so
+a Factory concern added later cannot land outside the root by accident.
+
+`refs/pins/` is the one exception, and it is not Factory's: it is varvig's
+federation primitive, acted on by varvig's GC root walk and pin handlers. A cell
+requests retention there without owning the namespace.
+
 ## Core decides the order
 
 Which work is most valuable is a repository-wide judgement made from recorded
@@ -788,7 +814,7 @@ silently — which looks exactly like a correctly ordered cell.
 
 ## Claims
 
-A claim is a TTL'd ref at `refs/claims/<cell-id>/<task-id>`. Three rules, and
+A claim is a TTL'd ref at `refs/factory/claims/<cell-id>/<task-id>`. Three rules, and
 they are the whole protocol:
 
 - **Claims are advisory.** They cannot be exclusive across a partition. Two cells
@@ -881,8 +907,8 @@ create-only correctly, and that is exactly how a fake stricter than reality hide
 a bug.
 
 The `authority` and `effect` integration tests answer the question no fake can:
-whether a real core accepts `refs/envelopes/`, `refs/leases/` and
-`refs/reservations/` at all, and whether create-only really is create-only there.
+whether a real core accepts `refs/factory/envelopes/`, `refs/factory/leases/` and
+`refs/factory/reservations/` at all, and whether create-only really is create-only there.
 It does, and it is — they are ordinary refs under unreserved prefixes, which is
 what makes the whole spend model deployable against today's core with no changes
 to it.

@@ -62,12 +62,12 @@ identity is the one thing that cannot be done afterwards.
 | Name | What it holds |
 |---|---|
 | `refs/factory/cells/<cell-id>/capabilities` | The cell's static capabilities object (§3) |
-| `refs/attempts/<cell-id>/<task-id>/<n>` | One immutable attempt, `n` counting from 1 |
-| `refs/claims/<cell-id>/<task-id>` | An advisory, TTL'd claim (§5) |
+| `refs/factory/attempts/<cell-id>/<task-id>/<n>` | One immutable attempt, `n` counting from 1 |
+| `refs/factory/claims/<cell-id>/<task-id>` | An advisory, TTL'd claim (§5) |
 | `refs/pins/<cell-id>/…` | Retention requests — varvig's own pin namespace (`FEDERATION.md` §4) |
-| `refs/envelopes/<overseer-id>` | The spend ceilings one overseer set, shared across its cells (§8.1) |
-| `refs/leases/<cell-id>/<capability>` | One exclusive allocation drawn from an envelope (§8.1) |
-| `refs/reservations/<cell-id>/<idempotency-key>` | An effectful action's reservation, keyed by its derived idempotency key (§8.2) |
+| `refs/factory/envelopes/<overseer-id>` | The spend ceilings one overseer set, shared across its cells (§8.1) |
+| `refs/factory/leases/<cell-id>/<capability>` | One exclusive allocation drawn from an envelope (§8.1) |
+| `refs/factory/reservations/<cell-id>/<idempotency-key>` | An effectful action's reservation, keyed by its derived idempotency key (§8.2) |
 | note namespace `factory/evidence` | Evidence for an attempt (§4) |
 | note namespace `factory/environment` | The environment descriptor an evidence record was produced in (§4.2) |
 | note namespace `factory/artifact` | *Legacy.* `artifact-ref` records, for a core without `tickets attach-artifact` (§7) |
@@ -76,6 +76,29 @@ identity is the one thing that cannot be done afterwards.
 
 `<task-id>` is the varvig ticket id — the genesis intent revision hash, stable
 forever (`TICKETS.md` §1.2). Factory does not mint its own task identity.
+
+**Every Factory ref nests under one root, `refs/factory/`.** The reason is that
+the *shapes* here are generic and the *semantics* are not. Any multi-worker
+system wants something called a claim; a Factory claim is advisory, expiring,
+never exclusive, and says nothing at all across a partition. A system that
+reasonably made claims *exclusive* would be writing a different meaning under
+the same name, and no reader could tell the two apart.
+
+That collision has already happened once between these two projects: varvig's
+speculation store calls its candidates "attempt-states", stored as files under
+`.varvig/spec/`, while a Factory attempt is a ref with different immutability
+rules. Two concepts, one word. Nesting at least says whose.
+
+What makes these semantics reusable is *this document*, not a shared prefix:
+another layer implementing leases under its own root has benefited from the
+argument in §8.1, while one writing into this root with its own lease model has
+created a hazard. varvig's core reserves the same root and asserts the nesting
+from its side, so the two agree by construction rather than by someone
+remembering.
+
+`refs/pins/` is the one deliberate exception, and it is not Factory's: it is
+varvig's federation primitive, acted on by varvig's own GC root walk and pin
+handlers. A cell requests retention there without owning the namespace.
 
 Two rules about these names:
 
@@ -237,7 +260,7 @@ matches anything, including itself.
 
 ## 5. Claims
 
-A claim is a ref at `refs/claims/<cell-id>/<task-id>` holding:
+A claim is a ref at `refs/factory/claims/<cell-id>/<task-id>` holding:
 
 ```json
 { "cell_id": "mini-a", "task": "<ticket id>", "not_after": 1755824400, "attempt": 1 }
@@ -406,7 +429,7 @@ between them is the whole design:
 | | Envelope | Lease |
 |---|---|---|
 | What it is | A **shared ceiling** across every cell under one overseer | An **exclusive allocation** to one cell |
-| Ref | `refs/envelopes/<overseer-id>` | `refs/leases/<cell-id>/<capability>` |
+| Ref | `refs/factory/envelopes/<overseer-id>` | `refs/factory/leases/<cell-id>/<capability>` |
 | Enforceable from a stale view? | No — another cell may have spent it | Yes — nobody else can spend it |
 | Spendable offline | No | Yes, indefinitely |
 
@@ -664,7 +687,7 @@ guesses is worse than one that goes quiet, so the shapes that would let it guess
 Deriving a stable key says what "the same action" means. It does not by itself
 stop the action happening twice — for that, the key has to be claimed somewhere
 that survives the process, **before** the effect is attempted. That place is
-`refs/reservations/<cell-id>/<idempotency-key>`, and the claim is create-only:
+`refs/factory/reservations/<cell-id>/<idempotency-key>`, and the claim is create-only:
 whoever creates the ref executes, and everyone else finds it already there. That
 is varvig's ordinary ref CAS doing the work; nothing here needs a lock.
 

@@ -290,7 +290,7 @@ func TestATightenedEnvelopeStopsTheLoopOrdering(t *testing.T) {
 		Overseer: "overseer-a", SetAt: effClock.Unix(),
 		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 50, Unit: "EUR", Quantity: 100}},
 	}
-	hash, err := v.ResolveRef("refs/envelopes/overseer-a")
+	hash, err := v.ResolveRef(cell.EnvelopePrefix + "overseer-a")
 	if err != nil {
 		t.Fatal(err)
 	}
