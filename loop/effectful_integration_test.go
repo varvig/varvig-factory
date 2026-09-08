@@ -40,6 +40,7 @@ func TestIntegrationEffectfulTicketAgainstRealCore(t *testing.T) {
 	}
 	repo := filepath.Join(dir, "repo")
 	v := varvigcli.Exec{Bin: bin, Dir: repo}
+	fr, pr := varvigcli.Collapsed(v)
 
 	iface := boardInterface(t)
 	spec := fmt.Sprintf("Order the prototype run.\nfactory-requires: effect=pcb-fabrication@1 interface=%s\nfactory-effect: {\"gerber\":\"rev-c\",\"quantity\":5}", iface)
@@ -79,14 +80,14 @@ func TestIntegrationEffectfulTicketAgainstRealCore(t *testing.T) {
 		Overseer: "overseer-a", SetAt: effClock.Unix(),
 		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 5000, Unit: "EUR", Quantity: 100}},
 	}
-	if _, err := authority.PublishEnvelope(v, env, ""); err != nil {
+	if _, err := authority.PublishEnvelope(fr, env, ""); err != nil {
 		t.Fatalf("real core refused an envelope: %v", err)
 	}
 	lease := authority.Lease{
 		CellID: "mini-a", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
 		Envelope: "1e20abc", Amount: 1000, Unit: "EUR", Quantity: 20, IssuedAt: effClock.Unix(),
 	}
-	if _, err := authority.PublishLease(v, lease, ""); err != nil {
+	if _, err := authority.PublishLease(fr, lease, ""); err != nil {
 		t.Fatalf("real core refused a lease: %v", err)
 	}
 
@@ -97,7 +98,8 @@ func TestIntegrationEffectfulTicketAgainstRealCore(t *testing.T) {
 			CellID:  "mini-a",
 			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: iface}},
 		},
-		V:                  v,
+		Factory:            fr,
+		Project:            pr,
 		Executors:          effect.Executors{fake},
 		EffectAuthorizedBy: "overseer-a",
 		EffectTTL:          3600,
@@ -125,14 +127,14 @@ func TestIntegrationEffectfulTicketAgainstRealCore(t *testing.T) {
 	}
 
 	// Real refs carry the outcome: the lease charged, nothing left pending.
-	after, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	after, _, err := authority.LoadLease(fr, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if after.Spent != 320 || after.Reserved != 0 {
 		t.Fatalf("lease against real core: spent=%g reserved=%g", after.Spent, after.Reserved)
 	}
-	if pending, err := effect.Pending(v, "mini-a"); err != nil || len(pending) != 0 {
+	if pending, err := effect.Pending(pr, "mini-a"); err != nil || len(pending) != 0 {
 		t.Fatalf("pending = %v (err %v), want empty", pending, err)
 	}
 

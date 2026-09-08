@@ -101,12 +101,12 @@ func TestRecordAndReadBackThroughVarvig(t *testing.T) {
 			promoted = "other"
 		}
 		obs := Observe("src/", ticketID, "top", promoted, now.Add(time.Duration(i)*time.Second))
-		if err := Record(v, ticketObj, obs); err != nil {
+		if err := Record(varvigcli.ProjectRepo{Varvig: v}, ticketObj, obs); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	rate, err := RateFor(v, "src/")
+	rate, err := RateFor(varvigcli.ProjectRepo{Varvig: v}, "src/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestRecordAndReadBackThroughVarvig(t *testing.T) {
 	}
 	// A scope with nothing recorded reads as zero observations rather than an
 	// error: "not measured yet" is the normal starting state.
-	empty, err := RateFor(v, "docs/")
+	empty, err := RateFor(varvigcli.ProjectRepo{Varvig: v}, "docs/")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestRecordAndReadBackThroughVarvig(t *testing.T) {
 
 func TestRecordRefusesAnInvalidObservation(t *testing.T) {
 	v := varvigcli.NewFake("a")
-	if err := Record(v, ticketObj, Observation{Scope: "src/"}); err == nil {
+	if err := Record(varvigcli.ProjectRepo{Varvig: v}, ticketObj, Observation{Scope: "src/"}); err == nil {
 		t.Fatal("an invalid observation was written")
 	}
 }
@@ -148,11 +148,11 @@ func TestObservationsSkipMalformedNotesRatherThanFailing(t *testing.T) {
 		t.Fatal(err)
 	}
 	good := Observe("src/", ticketID, "top", "top", now)
-	if err := Record(v, target, good); err != nil {
+	if err := Record(varvigcli.ProjectRepo{Varvig: v}, target, good); err != nil {
 		t.Fatal(err)
 	}
 
-	obs, err := Observations(v)
+	obs, err := Observations(varvigcli.ProjectRepo{Varvig: v})
 	if err != nil {
 		t.Fatalf("one malformed note broke the whole read: %v", err)
 	}

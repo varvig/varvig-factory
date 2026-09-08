@@ -41,6 +41,7 @@ func effectCell(t *testing.T, amount float64) (*Cell, *varvigcli.Fake, *effect.F
 	t.Helper()
 	iface := boardInterface(t)
 	v := varvigcli.NewFake("mini-a")
+	fr, pr := varvigcli.Collapsed(v)
 	spec := fmt.Sprintf("Order the prototype run.\nfactory-requires: effect=pcb-fabrication@1 interface=%s\nfactory-effect: {\"gerber\":\"rev-c\",\"quantity\":5}", iface)
 	v.AddTicket(effTicket, spec, varvigcli.Scope{Reads: []string{"hardware"}, Writes: []string{"hardware"}}, "approved")
 
@@ -48,14 +49,14 @@ func effectCell(t *testing.T, amount float64) (*Cell, *varvigcli.Fake, *effect.F
 		Overseer: "overseer-a", SetAt: effClock.Unix(),
 		Ceilings: []authority.Ceiling{{Capability: "pcb-fabrication@1", Spend: 5000, Unit: "EUR", Quantity: 100}},
 	}
-	if _, err := authority.PublishEnvelope(v, env, ""); err != nil {
+	if _, err := authority.PublishEnvelope(fr, env, ""); err != nil {
 		t.Fatal(err)
 	}
 	lease := authority.Lease{
 		CellID: "mini-a", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
 		Envelope: "1e20abc", Amount: amount, Unit: "EUR", Quantity: 20, IssuedAt: effClock.Unix(),
 	}
-	if _, err := authority.PublishLease(v, lease, ""); err != nil {
+	if _, err := authority.PublishLease(fr, lease, ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -74,7 +75,8 @@ func effectCell(t *testing.T, amount float64) (*Cell, *varvigcli.Fake, *effect.F
 			CellID:  "mini-a",
 			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: iface}},
 		},
-		V:                  v,
+		Factory:            fr,
+		Project:            pr,
 		Ledger:             ledger,
 		Executors:          effect.Executors{fake},
 		EffectAuthorizedBy: "overseer-a",
@@ -115,7 +117,7 @@ func TestATicketCanOrderAThing(t *testing.T) {
 	}
 
 	// The lease was actually charged, and the hold converted rather than left.
-	lease, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	lease, _, err := authority.LoadLease(c.Factory, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,13 +175,13 @@ func TestAnUnknownOutcomeStaysPendingAndEscalates(t *testing.T) {
 	}
 
 	// The reservation stays pending, so it shows up for a principal to check.
-	pending, err := effect.Pending(v, "mini-a")
+	pending, err := effect.Pending(c.Project, "mini-a")
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("pending = %d (err %v), want the one unresolved action", len(pending), err)
 	}
 	// The hold is NOT released: the money may be gone, and returning it would
 	// let the cell spend it a second time.
-	lease, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	lease, _, err := authority.LoadLease(c.Factory, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +210,7 @@ func TestADefiniteRejectionReleasesTheHold(t *testing.T) {
 	if res.Done || res.Unresolved || !res.Refused {
 		t.Fatalf("a definite rejection was not recorded as one: %+v", res)
 	}
-	lease, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	lease, _, err := authority.LoadLease(c.Factory, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +219,7 @@ func TestADefiniteRejectionReleasesTheHold(t *testing.T) {
 	}
 	// Nothing pending: a confirmed rejection is resolved, and listing it as
 	// unknown would bury the ones that really are.
-	if p, err := effect.Pending(v, "mini-a"); err != nil || len(p) != 0 {
+	if p, err := effect.Pending(c.Project, "mini-a"); err != nil || len(p) != 0 {
 		t.Fatalf("pending = %v (err %v), want empty", p, err)
 	}
 	// The key stays claimed, so the loop does not simply try again.
@@ -247,7 +249,7 @@ func TestAQuoteBeyondTheLeaseNeverReachesTheExecutor(t *testing.T) {
 		t.Fatalf("quoted %d times, want 1: pricing must precede authorization", len(fake.Quoted))
 	}
 	// Nothing was held, and nothing is pending.
-	lease, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	lease, _, err := authority.LoadLease(c.Factory, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +296,7 @@ func TestATightenedEnvelopeStopsTheLoopOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := authority.PublishEnvelope(v, tight, hash); err != nil {
+	if _, err := authority.PublishEnvelope(c.Factory, tight, hash); err != nil {
 		t.Fatal(err)
 	}
 
@@ -427,7 +429,7 @@ func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
 	}
 	// The headroom is committed at the offer: a connector may pick it up at any
 	// moment and the cell cannot take that back.
-	held, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	held, _, err := authority.LoadLease(c.Factory, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,15 +439,15 @@ func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
 
 	// A connector, elsewhere.
 	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: iface, Effectful: true}
-	awaiting, err := effect.Awaiting(v, capability)
+	awaiting, err := effect.Awaiting(c.Project, capability)
 	if err != nil || len(awaiting) != 1 {
 		t.Fatalf("awaiting = %+v (err %v)", awaiting, err)
 	}
-	taken, err := effect.Take(v, "mini-a", awaiting[0].Key, "fab-connector", effClock.Unix()+1, 0)
+	taken, err := effect.Take(c.Project, "mini-a", awaiting[0].Key, "fab-connector", effClock.Unix()+1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := effect.Report(v, taken, "fab-connector", true, "PO-77", 341.20, "2 layer", effClock.Unix()+60); err != nil {
+	if _, err := effect.Report(c.Project, taken, "fab-connector", true, "PO-77", 341.20, "2 layer", effClock.Unix()+60); err != nil {
 		t.Fatal(err)
 	}
 
@@ -465,7 +467,7 @@ func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
 	if settled == nil || !settled.Done {
 		t.Fatalf("the report was not settled: %+v", rep.Effects)
 	}
-	after, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	after, _, err := authority.LoadLease(c.Factory, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}

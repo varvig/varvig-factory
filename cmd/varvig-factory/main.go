@@ -389,7 +389,7 @@ func cmdPromote(args []string) error {
 		// Enabling a path is not the same as being able to use it. Report the
 		// agreement gate now rather than letting an operator discover it at the
 		// first deferred promotion.
-		rate, err := agreement.RateFor(built.Varvig, path)
+		rate, err := agreement.RateFor(built.Project, path)
 		if err == nil {
 			verdict := agreement.NewGate(0, 0).Allow(rate)
 			fmt.Println(verdict.String())
@@ -445,7 +445,7 @@ func cmdAgreement(args []string) error {
 	}
 	g := agreement.NewGate(0, 0)
 	if scope := f.values["scope"]; scope != "" {
-		rate, err := agreement.RateFor(built.Varvig, scope)
+		rate, err := agreement.RateFor(built.Project, scope)
 		if err != nil {
 			return err
 		}
@@ -453,7 +453,7 @@ func cmdAgreement(args []string) error {
 		fmt.Println(g.Allow(rate).String())
 		return nil
 	}
-	rates, err := agreement.Rates(built.Varvig)
+	rates, err := agreement.Rates(built.Project)
 	if err != nil {
 		return err
 	}
@@ -534,7 +534,7 @@ func cmdAuthority(args []string) error {
 
 	// The unresolved-outcome report comes first, because it is the only thing on
 	// this page that might be an order nobody knows about.
-	pending, pendErr := effect.Pending(built.Varvig, me)
+	pending, pendErr := effect.Pending(built.Project, me)
 	if pendErr != nil {
 		fmt.Fprintf(os.Stderr, "warning: %v\n", pendErr)
 	}
@@ -548,7 +548,7 @@ func cmdAuthority(args []string) error {
 		fmt.Println()
 	}
 
-	leases, listErr := authority.Leases(built.Varvig, "")
+	leases, listErr := authority.Leases(built.Factory, "")
 	if listErr != nil && len(leases) == 0 && len(pending) == 0 {
 		// Nothing was read, so there is nothing to report. Saying "no leases"
 		// here would be reporting an unreadable repository as an empty one, and
@@ -579,7 +579,7 @@ func cmdAuthority(args []string) error {
 		overseers[l.Overseer] = true
 	}
 	for overseer := range overseers {
-		if env, _, err := authority.LoadEnvelope(built.Varvig, overseer); err == nil {
+		if env, _, err := authority.LoadEnvelope(built.Factory, overseer); err == nil {
 			envelopes[overseer] = env
 		}
 	}
@@ -627,7 +627,7 @@ func cmdAuthority(args []string) error {
 		if !ok {
 			// A lease naming an envelope this cell cannot read is worth saying
 			// out loud: the ceiling it is drawn from cannot be checked here.
-			_, _, err := authority.LoadEnvelope(built.Varvig, overseer)
+			_, _, err := authority.LoadEnvelope(built.Factory, overseer)
 			fmt.Printf("\nenvelope %s: %v\n", overseer, err)
 			continue
 		}

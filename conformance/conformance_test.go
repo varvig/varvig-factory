@@ -43,8 +43,11 @@ var (
 
 // harness is one configured cell plus the fakes behind it.
 type harness struct {
-	t      *testing.T
-	Cell   *loop.Cell
+	t    *testing.T
+	Cell *loop.Cell
+	// V is the one repository behind both of the cell's replicas, kept for the
+	// vectors that seed or inspect it directly. Which *role* a call is in is
+	// said by Factory()/Project(), not by this field.
 	V      *varvigcli.Fake
 	Model  *inference.Fake
 	Box    *sandbox.Fake
@@ -52,6 +55,14 @@ type harness struct {
 	Ledger *budget.Ledger
 	Logs   []string
 }
+
+// Factory and Project are the harness's two handles onto its single
+// repository. A conformance vector that reaches for the right one is asserting
+// the same thing the compiler asserts in production: that a lease read comes
+// from the coordination replica and a ticket read from the project replica,
+// even when they are the same replica here.
+func (h *harness) Factory() varvigcli.FactoryRepo { return varvigcli.FactoryRepo{Varvig: h.V} }
+func (h *harness) Project() varvigcli.ProjectRepo { return varvigcli.ProjectRepo{Varvig: h.V} }
 
 type opts struct {
 	cellID   string
@@ -93,6 +104,7 @@ func newHarness(t *testing.T, o opts) *harness {
 		o.reply = defaultOpts(o.cellID).reply
 	}
 	v := varvigcli.NewFake(o.cellID)
+	fr, pr := varvigcli.Collapsed(v)
 	v.AddTicket(taskID, "Add A to src.\n", theScope, "approved")
 	// The ticket's ref resolves to a stable object, which is where agreement
 	// observations attach.
@@ -159,7 +171,8 @@ func newHarness(t *testing.T, o opts) *harness {
 			Test:      []string{"unit"},
 			Roles:     o.roles,
 		},
-		V:         v,
+		Factory:   fr,
+		Project:   pr,
 		Inference: runtime,
 		Sandbox:   box,
 		Artifacts: &artifact.LocalCAS{Root: filepath.Join(t.TempDir(), "cas")},
@@ -174,7 +187,7 @@ func newHarness(t *testing.T, o opts) *harness {
 		Log:       func(s string) { h.Logs = append(h.Logs, s) },
 	}
 	h.Cell.Promoter = &promote.Promoter{
-		V: v, Switch: sw, Gate: gate.Module{V: v},
+		Project: pr, Switch: sw, Gate: gate.Module{Project: pr},
 		Agreement:   agreement.NewGate(0, 0),
 		Reverify:    h.Cell,
 		CellID:      o.cellID,
@@ -201,7 +214,7 @@ func (h *harness) recordAgreement(scope string, n int) {
 	h.t.Helper()
 	for i := 0; i < n; i++ {
 		obs := agreement.Observe(scope, taskID, "aa11top000000000000000000000000000000000000000000000000000000aa11", "aa11top000000000000000000000000000000000000000000000000000000aa11", now.Add(time.Duration(i)*time.Second))
-		if err := agreement.Record(h.V, taskObj, obs); err != nil {
+		if err := agreement.Record(h.Project(), taskObj, obs); err != nil {
 			h.t.Fatal(err)
 		}
 	}
@@ -944,11 +957,11 @@ func Test08_AgreementRateGate(t *testing.T) {
 			promoted = "bb22other0000000000000000000000000000000000000000000000000000bb22"
 		}
 		obs := agreement.Observe("src/", taskID, "aa11top000000000000000000000000000000000000000000000000000000aa11", promoted, now.Add(time.Duration(i)*time.Second))
-		if err := agreement.Record(h.V, taskObj, obs); err != nil {
+		if err := agreement.Record(h.Project(), taskObj, obs); err != nil {
 			t.Fatal(err)
 		}
 	}
-	rate, err := agreement.RateFor(h.V, "src/")
+	rate, err := agreement.RateFor(h.Project(), "src/")
 	if err != nil {
 		t.Fatal(err)
 	}

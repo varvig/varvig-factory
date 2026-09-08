@@ -166,7 +166,7 @@ func (g Gate) Allow(r Rate) Verdict {
 // enumerate — instead of a search for changes it would have to already know
 // about. Notes replicate by default (FEDERATION.md §3), so an observation made
 // by one cell is available to the federation without a new protocol.
-func Record(v varvigcli.Varvig, ticketObject string, o Observation) error {
+func Record(p varvigcli.ProjectRepo, ticketObject string, o Observation) error {
 	if err := o.Validate(); err != nil {
 		return err
 	}
@@ -174,7 +174,7 @@ func Record(v varvigcli.Varvig, ticketObject string, o Observation) error {
 	if err != nil {
 		return err
 	}
-	return v.AddNote(ticketObject, cell.NoteAgreement, payload)
+	return p.AddNote(ticketObject, cell.NoteAgreement, payload)
 }
 
 // Observations reads every agreement observation in the repository, by walking
@@ -183,12 +183,12 @@ func Record(v varvigcli.Varvig, ticketObject string, o Observation) error {
 // It is O(tickets) reads. That is acceptable and deliberate: the alternative is
 // a locally cached index, and a local index is precisely the kind of state that
 // makes two cells disagree about a federated fact.
-func Observations(v varvigcli.Varvig) ([]Observation, error) {
-	ids, err := v.TicketIDs()
+func Observations(p varvigcli.ProjectRepo) ([]Observation, error) {
+	ids, err := p.TicketIDs()
 	if err != nil {
 		return nil, err
 	}
-	refs, err := v.Refs()
+	refs, err := p.Refs()
 	if err != nil {
 		return nil, err
 	}
@@ -203,7 +203,7 @@ func Observations(v varvigcli.Varvig) ([]Observation, error) {
 		if !ok {
 			continue
 		}
-		notes, err := v.Notes(target, cell.NoteAgreement)
+		notes, err := p.Notes(target, cell.NoteAgreement)
 		if err != nil {
 			return nil, err
 		}
@@ -250,8 +250,8 @@ func Tally(obs []Observation) map[string]Rate {
 }
 
 // Rates reads and aggregates in one call.
-func Rates(v varvigcli.Varvig) (map[string]Rate, error) {
-	obs, err := Observations(v)
+func Rates(p varvigcli.ProjectRepo) (map[string]Rate, error) {
+	obs, err := Observations(p)
 	if err != nil {
 		return nil, err
 	}
@@ -259,8 +259,8 @@ func Rates(v varvigcli.Varvig) (map[string]Rate, error) {
 }
 
 // RateFor returns the rate for one scope, zero-valued when nothing is recorded.
-func RateFor(v varvigcli.Varvig, scope string) (Rate, error) {
-	rates, err := Rates(v)
+func RateFor(p varvigcli.ProjectRepo, scope string) (Rate, error) {
+	rates, err := Rates(p)
 	if err != nil {
 		return Rate{}, err
 	}

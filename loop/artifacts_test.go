@@ -20,11 +20,13 @@ const artChange = "b2dec0de00000000000000000000000000000000000000000000000000000
 func artifactCell(t *testing.T) (*Cell, *varvigcli.Fake, *[]string) {
 	t.Helper()
 	v := varvigcli.NewFake("mini-a")
+	fr, pr := varvigcli.Collapsed(v)
 	v.AddTicket(artTicket, "Build the image.", varvigcli.Scope{Reads: []string{"src"}, Writes: []string{"src"}}, "approved")
 	logs := &[]string{}
 	c := &Cell{
 		Capabilities:  cell.Capabilities{CellID: "mini-a"},
-		V:             v,
+		Factory:       fr,
+		Project:       pr,
 		Artifacts:     &artifact.LocalCAS{Root: filepath.Join(t.TempDir(), "cas")},
 		ArtifactGlobs: []string{"out/*.bin"},
 		Log:           func(s string) { *logs = append(*logs, s) },

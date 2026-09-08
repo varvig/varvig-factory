@@ -15,13 +15,13 @@ import (
 
 // offered reserves without taking — the connector-served shape, where the cell's
 // part ends at the offer.
-func offered(t *testing.T, v varvigcli.Varvig, g authority.Grant, c Capability, deadline int64) Claim {
+func offered(t *testing.T, v repos, g authority.Grant, c Capability, deadline int64) Claim {
 	t.Helper()
-	claim, err := Reserve(v, order(t, c), "mini-a", g, at.Unix(), 3600)
+	claim, err := Reserve(v.F, v.P, order(t, c), "mini-a", g, at.Unix(), 3600)
 	if err != nil {
 		t.Fatal(err)
 	}
-	claim, err = Offer(v, claim, deadline)
+	claim, err = Offer(v.P, claim, deadline)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func TestAConnectorFindsAndTakesWork(t *testing.T) {
 
 	// The inbox is derived from repository state, not a queue: a connector that
 	// restarts sees the same list.
-	awaiting, err := Awaiting(v, c)
+	awaiting, err := Awaiting(v.P, c)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,7 +43,7 @@ func TestAConnectorFindsAndTakesWork(t *testing.T) {
 		t.Fatalf("awaiting = %+v, want the one offer", awaiting)
 	}
 
-	taken, err := Take(v, "mini-a", claim.Reservation.Key, "fab-connector", at.Unix()+1, at.Unix()+600)
+	taken, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-connector", at.Unix()+1, at.Unix()+600)
 	if err != nil {
 		t.Fatalf("taking an offer: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestAConnectorFindsAndTakesWork(t *testing.T) {
 	}
 
 	// Once taken it leaves the inbox, so a second connector does not see it.
-	if awaiting, err := Awaiting(v, c); err != nil || len(awaiting) != 0 {
+	if awaiting, err := Awaiting(v.P, c); err != nil || len(awaiting) != 0 {
 		t.Fatalf("a taken reservation is still offered: %+v (err %v)", awaiting, err)
 	}
 }
@@ -64,10 +64,10 @@ func TestTwoConnectorsRacingProduceOneOrder(t *testing.T) {
 	v, g := leased(t, 1000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
 
-	if _, err := Take(v, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0); err != nil {
+	if _, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0); err != nil {
 		t.Fatal(err)
 	}
-	loser, err := Take(v, "mini-a", claim.Reservation.Key, "fab-b", at.Unix()+2, 0)
+	loser, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-b", at.Unix()+2, 0)
 	if !errors.Is(err, ErrNotOffered) {
 		t.Fatalf("a second connector took the same offer: %v", err)
 	}
@@ -82,16 +82,16 @@ func TestOnlyTheHolderMayReport(t *testing.T) {
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
-	taken, err := Take(v, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
+	taken, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := Report(v, taken, "fab-b", true, "PO-1", 0, "", at.Unix()+5); !errors.Is(err, ErrNotHolder) {
+	if _, err := Report(v.P, taken, "fab-b", true, "PO-1", 0, "", at.Unix()+5); !errors.Is(err, ErrNotHolder) {
 		t.Fatalf("a connector reported on work it does not hold: %v", err)
 	}
 	// And nothing may be reported on an offer nobody has taken.
-	if _, err := Report(v, claim, "fab-a", true, "PO-1", 0, "", at.Unix()+5); !errors.Is(err, ErrNotHolder) {
+	if _, err := Report(v.P, claim, "fab-a", true, "PO-1", 0, "", at.Unix()+5); !errors.Is(err, ErrNotHolder) {
 		t.Fatalf("an untaken offer accepted a report: %v", err)
 	}
 }
@@ -103,12 +103,12 @@ func TestAConnectorReportsAndOnlyTheCellSpends(t *testing.T) {
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
-	taken, err := Take(v, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
+	taken, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	reported, err := Report(v, taken, "fab-a", true, "PO-90210", 355.40, "shipped", at.Unix()+5)
+	reported, err := Report(v.P, taken, "fab-a", true, "PO-90210", 355.40, "shipped", at.Unix()+5)
 	if err != nil {
 		t.Fatalf("reporting: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestAConnectorReportsAndOnlyTheCellSpends(t *testing.T) {
 
 	// The connector did not move money: the hold still stands and nothing is
 	// spent, because reporting is not settling.
-	mid, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	mid, _, err := authority.LoadLease(v.F, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,15 +127,15 @@ func TestAConnectorReportsAndOnlyTheCellSpends(t *testing.T) {
 	}
 
 	// The cell settles from the report, at the reported actual.
-	lease, leaseHash, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	lease, leaseHash, err := authority.LoadLease(v.F, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	toSettle, err := LoadClaim(v, "mini-a", reported.Reservation.Key, lease, leaseHash)
+	toSettle, err := LoadClaim(v.P, "mini-a", reported.Reservation.Key, lease, leaseHash)
 	if err != nil {
 		t.Fatal(err)
 	}
-	settled, err := SettleReported(v, toSettle, at.Unix()+10)
+	settled, err := SettleReported(v.F, v.P, toSettle, at.Unix()+10)
 	if err != nil {
 		t.Fatalf("settling a report: %v", err)
 	}
@@ -152,26 +152,26 @@ func TestALyingConnectorIsBoundedByTheLease(t *testing.T) {
 	c := fabrication(t)
 	v, g := leased(t, 400, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
-	taken, err := Take(v, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
+	taken, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Report(v, taken, "fab-a", true, "PO-1", 999999, "", at.Unix()+5); err != nil {
+	if _, err := Report(v.P, taken, "fab-a", true, "PO-1", 999999, "", at.Unix()+5); err != nil {
 		t.Fatalf("reporting: %v", err)
 	}
 
-	lease, leaseHash, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	lease, leaseHash, err := authority.LoadLease(v.F, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	toSettle, err := LoadClaim(v, "mini-a", taken.Reservation.Key, lease, leaseHash)
+	toSettle, err := LoadClaim(v.P, "mini-a", taken.Reservation.Key, lease, leaseHash)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := SettleReported(v, toSettle, at.Unix()+10); err == nil {
+	if _, err := SettleReported(v.F, v.P, toSettle, at.Unix()+10); err == nil {
 		t.Fatal("a connector's inflated figure was applied to the lease")
 	}
-	after, _, err := authority.LoadLease(v, "mini-a", "pcb-fabrication@1")
+	after, _, err := authority.LoadLease(v.F, "mini-a", "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,13 +186,13 @@ func TestAConnectorCannotInventWork(t *testing.T) {
 	c := fabrication(t)
 	v, _ := leased(t, 1000, 20)
 
-	if awaiting, err := Awaiting(v, c); err != nil || len(awaiting) != 0 {
+	if awaiting, err := Awaiting(v.P, c); err != nil || len(awaiting) != 0 {
 		t.Fatalf("awaiting = %+v (err %v), want nothing before anything is offered", awaiting, err)
 	}
-	if _, err := Take(v, "mini-a", strings.Repeat("a", 64), "fab-a", at.Unix(), 0); err == nil {
+	if _, err := Take(v.P, "mini-a", strings.Repeat("a", 64), "fab-a", at.Unix(), 0); err == nil {
 		t.Fatal("a connector took a reservation that does not exist")
 	}
-	if _, err := Take(v, "mini-a", strings.Repeat("a", 64), "", at.Unix(), 0); err == nil {
+	if _, err := Take(v.P, "mini-a", strings.Repeat("a", 64), "", at.Unix(), 0); err == nil {
 		t.Fatal("an anonymous connector took work")
 	}
 }
@@ -203,20 +203,20 @@ func TestAConnectorThatDoesNotKnowReportsNothing(t *testing.T) {
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
-	taken, err := Take(v, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
+	taken, err := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := Report(v, taken, "fab-a", true, "", 0, "", at.Unix()+5); err == nil {
+	if _, err := Report(v.P, taken, "fab-a", true, "", 0, "", at.Unix()+5); err == nil {
 		t.Fatal("a success was reported with no external reference")
 	}
-	if _, err := Report(v, taken, "fab-a", false, "", 0, "", at.Unix()+5); err == nil {
+	if _, err := Report(v.P, taken, "fab-a", false, "", 0, "", at.Unix()+5); err == nil {
 		t.Fatal("a rejection was reported with no refusal behind it")
 	}
 
 	// Going quiet leaves it pending, which is the honest record and escalates.
-	pending, err := Pending(v, "mini-a")
+	pending, err := Pending(v.P, "mini-a")
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("pending = %+v (err %v), want the one taken-but-unreported action", pending, err)
 	}
@@ -233,14 +233,14 @@ func TestAnUntakenOfferIsNotAnUnknownOutcome(t *testing.T) {
 	if claim.Reservation.Unresolved() {
 		t.Fatal("an untaken offer reported an unknown outcome")
 	}
-	if pending, err := Pending(v, "mini-a"); err != nil || len(pending) != 0 {
+	if pending, err := Pending(v.P, "mini-a"); err != nil || len(pending) != 0 {
 		t.Fatalf("pending = %+v, want empty: nothing has acted yet", pending)
 	}
 	// It does still hold money, though, which is what the expiry sweep is for.
 	if !claim.Reservation.Open() {
 		t.Fatal("an offer awaiting a connector did not report open")
 	}
-	lease, leaseHash, released, err := ReleaseExpired(v, claim.Lease, claim.LeaseHash, at.Unix()+7200)
+	lease, leaseHash, released, err := ReleaseExpired(v.F, v.P, claim.Lease, claim.LeaseHash, at.Unix()+7200)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,11 +256,11 @@ func TestTheKeyStaysClaimedEvenForAnUntakenOffer(t *testing.T) {
 	c := fabrication(t)
 	v, g := leased(t, 1000, 20)
 	claim := offered(t, v, g, c, at.Unix()+600)
-	lease, _, _, err := ReleaseExpired(v, claim.Lease, claim.LeaseHash, at.Unix()+7200)
+	lease, _, _, err := ReleaseExpired(v.F, v.P, claim.Lease, claim.LeaseHash, at.Unix()+7200)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Reserve(v, order(t, c), "mini-a", authority.Grant{Envelope: g.Envelope, Lease: &lease}, at.Unix()+7200, 3600); !errors.Is(err, ErrAlreadyReserved) {
+	if _, err := Reserve(v.F, v.P, order(t, c), "mini-a", authority.Grant{Envelope: g.Envelope, Lease: &lease}, at.Unix()+7200, 3600); !errors.Is(err, ErrAlreadyReserved) {
 		t.Fatalf("an expired offer released its key: %v", err)
 	}
 }
@@ -285,35 +285,38 @@ func TestIntegrationConnectorExchangeAgainstRealCore(t *testing.T) {
 	if out, err := init.CombinedOutput(); err != nil {
 		t.Fatalf("varvig init: %v: %s", err, out)
 	}
-	v := varvigcli.Exec{Bin: bin, Dir: filepath.Join(dir, "repo")}
+	// One real repository, both roles — the collapsed configuration, which is
+	// also the one this test can build with a single `varvig init`.
+	fr, pr := varvigcli.Collapsed(varvigcli.Exec{Bin: bin, Dir: filepath.Join(dir, "repo")})
+	v := repos{F: fr, P: pr}
 
 	c := fabrication(t)
 	env := authority.Envelope{
 		Overseer: "overseer-a", SetAt: at.Unix(),
 		Ceilings: []authority.Ceiling{{Capability: c.ID, Spend: 5000, Unit: "EUR", Quantity: 100}},
 	}
-	if _, err := authority.PublishEnvelope(v, env, ""); err != nil {
+	if _, err := authority.PublishEnvelope(v.F, env, ""); err != nil {
 		t.Fatal(err)
 	}
 	l := authority.Lease{
 		CellID: "mini-a", Capability: c.ID, Overseer: "overseer-a",
 		Envelope: "1e20abc", Amount: 1000, Unit: "EUR", Quantity: 20, IssuedAt: at.Unix(),
 	}
-	leaseHash, err := authority.PublishLease(v, l, "")
+	leaseHash, err := authority.PublishLease(v.F, l, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	g := authority.Grant{Envelope: env, Lease: &l, LeaseHash: leaseHash}
 
 	claim := offered(t, v, g, c, at.Unix()+600)
-	awaiting, err := Awaiting(v, c)
+	awaiting, err := Awaiting(v.P, c)
 	if err != nil || len(awaiting) != 1 {
 		t.Fatalf("awaiting against a real core = %+v (err %v)", awaiting, err)
 	}
 
 	// Two connectors race on real refs. Exactly one wins.
-	first, firstErr := Take(v, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
-	_, secondErr := Take(v, "mini-a", claim.Reservation.Key, "fab-b", at.Unix()+2, 0)
+	first, firstErr := Take(v.P, "mini-a", claim.Reservation.Key, "fab-a", at.Unix()+1, 0)
+	_, secondErr := Take(v.P, "mini-a", claim.Reservation.Key, "fab-b", at.Unix()+2, 0)
 	if firstErr != nil {
 		t.Fatalf("the first take failed: %v", firstErr)
 	}
@@ -321,11 +324,11 @@ func TestIntegrationConnectorExchangeAgainstRealCore(t *testing.T) {
 		t.Fatalf("a real core let two connectors take one offer: %v", secondErr)
 	}
 
-	reported, err := Report(v, first, "fab-a", true, "PO-90210", 0, "", at.Unix()+5)
+	reported, err := Report(v.P, first, "fab-a", true, "PO-90210", 0, "", at.Unix()+5)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, _, err := authority.LoadLease(v, "mini-a", c.ID)
+	pending, _, err := authority.LoadLease(v.F, "mini-a", c.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,11 +336,11 @@ func TestIntegrationConnectorExchangeAgainstRealCore(t *testing.T) {
 		t.Fatalf("a report moved money against a real core: spent=%g", pending.Spent)
 	}
 
-	toSettle, err := LoadClaim(v, "mini-a", reported.Reservation.Key, pending, mustHash(t, v, "mini-a", reported.Reservation.Key))
+	toSettle, err := LoadClaim(v.P, "mini-a", reported.Reservation.Key, pending, mustHash(t, v, "mini-a", reported.Reservation.Key))
 	if err != nil {
 		t.Fatal(err)
 	}
-	settled, err := SettleReported(v, toSettle, at.Unix()+10)
+	settled, err := SettleReported(v.F, v.P, toSettle, at.Unix()+10)
 	if err != nil {
 		t.Fatalf("settling against a real core: %v", err)
 	}
@@ -347,13 +350,13 @@ func TestIntegrationConnectorExchangeAgainstRealCore(t *testing.T) {
 }
 
 // mustHash reloads the lease hash a settlement needs to CAS against.
-func mustHash(t *testing.T, v varvigcli.Varvig, cellID, key string) string {
+func mustHash(t *testing.T, v repos, cellID, key string) string {
 	t.Helper()
 	name, err := cell.LeaseRef(cellID, "pcb-fabrication@1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	h, err := v.ResolveRef(name)
+	h, err := v.F.ResolveRef(name)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -32,7 +32,7 @@ func TestExitCodesMapToVerdicts(t *testing.T) {
 	for _, tc := range cases {
 		v := varvigcli.NewFake("a")
 		v.BindHook(Event, moduleFor(tc.exit))
-		res, err := (Module{V: v}).Evaluate(context.Background(), Input{})
+		res, err := (Module{Project: varvigcli.ProjectRepo{Varvig: v}}).Evaluate(context.Background(), Input{})
 		if err != nil {
 			t.Fatalf("exit %d: %v", tc.exit, err)
 		}
@@ -49,7 +49,7 @@ func TestNoModuleIsNotAnApprovingGate(t *testing.T) {
 	// same thing — which they are for gated promotion and are emphatically not
 	// for autonomous.
 	v := varvigcli.NewFake("a")
-	res, err := (Module{V: v}).Evaluate(context.Background(), Input{})
+	res, err := (Module{Project: varvigcli.ProjectRepo{Varvig: v}}).Evaluate(context.Background(), Input{})
 	if !errors.Is(err, ErrNoModule) {
 		t.Fatalf("err = %v, want ErrNoModule", err)
 	}
@@ -77,7 +77,7 @@ func TestTheMostConservativeVerdictWins(t *testing.T) {
 		for _, e := range tc.exits {
 			v.BindHook(Event, moduleFor(e))
 		}
-		res, err := (Module{V: v}).Evaluate(context.Background(), Input{})
+		res, err := (Module{Project: varvigcli.ProjectRepo{Varvig: v}}).Evaluate(context.Background(), Input{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -92,7 +92,7 @@ func TestTheModulesExplanationTravelsWithTheVerdict(t *testing.T) {
 	v.BindHook(Event, func([]byte) varvigcli.HookResult {
 		return varvigcli.HookResult{ExitCode: 2, Stderr: "cross-class evidence, deferring"}
 	})
-	res, err := (Module{V: v}).Evaluate(context.Background(), Input{})
+	res, err := (Module{Project: varvigcli.ProjectRepo{Varvig: v}}).Evaluate(context.Background(), Input{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +126,7 @@ func TestInputIsCanonicalAndCarriesTheDecisionContext(t *testing.T) {
 		Independent: true,
 		Agreement:   AgreementView{Observations: 40, Agreements: 34, Rate: 0.85},
 	}
-	if _, err := (Module{V: v}).Evaluate(context.Background(), in); err != nil {
+	if _, err := (Module{Project: varvigcli.ProjectRepo{Varvig: v}}).Evaluate(context.Background(), in); err != nil {
 		t.Fatal(err)
 	}
 	// The module receives a computed context on stdin, canonically encoded — the

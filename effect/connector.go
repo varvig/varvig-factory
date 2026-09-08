@@ -65,13 +65,13 @@ var ErrNotHolder = errors.New("effect: reservation is held by someone else")
 // rather than in-process. The reservation is real and the lease headroom is
 // already held — the money is committed the moment the offer exists, because a
 // connector may pick it up at any time and the cell cannot take that back.
-func Offer(v varvigcli.Varvig, c Claim, deadline int64) (Claim, error) {
+func Offer(p varvigcli.ProjectRepo, c Claim, deadline int64) (Claim, error) {
 	if c.Reservation.State != StateOffered {
 		return c, fmt.Errorf("%w: %s is %s", ErrNotOffered, short(c.Reservation.Key), c.Reservation.State)
 	}
 	r := c.Reservation
 	r.TakeDeadline = deadline
-	hash, err := update(v, r, c.Hash)
+	hash, err := update(p, r, c.Hash)
 	if err != nil {
 		return c, err
 	}
@@ -89,11 +89,11 @@ func Offer(v varvigcli.Varvig, c Claim, deadline int64) (Claim, error) {
 // Matching is on the interface **hash**, never the alias: a connector serving a
 // different interface under the same name is serving a different capability
 // (§2.1), and here that mistake is resolved by spending money.
-func Awaiting(v varvigcli.Varvig, capability Capability) ([]Reservation, error) {
+func Awaiting(p varvigcli.ProjectRepo, capability Capability) ([]Reservation, error) {
 	if err := capability.Validate(); err != nil {
 		return nil, err
 	}
-	all, err := allReservations(v)
+	all, err := allReservations(p)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +116,7 @@ func Awaiting(v varvigcli.Varvig, capability Capability) ([]Reservation, error) 
 // the reservation to anyone else: by then the connector may have reached the
 // vendor, and handing the same action to a second connector is precisely the
 // double-order this protocol exists to prevent. A stale claim escalates.
-func Take(v varvigcli.Varvig, cellID, key, connectorID string, at, deadline int64) (Claim, error) {
+func Take(p varvigcli.ProjectRepo, cellID, key, connectorID string, at, deadline int64) (Claim, error) {
 	if connectorID == "" {
 		return Claim{}, errors.New("effect: a connector must identify itself to take a reservation")
 	}
@@ -124,7 +124,7 @@ func Take(v varvigcli.Varvig, cellID, key, connectorID string, at, deadline int6
 	if err != nil {
 		return Claim{}, err
 	}
-	r, hash, err := loadReservation(v, name)
+	r, hash, err := loadReservation(p, name)
 	if err != nil {
 		return Claim{}, err
 	}
@@ -141,13 +141,13 @@ func Take(v varvigcli.Varvig, cellID, key, connectorID string, at, deadline int6
 	if deadline > 0 {
 		r.TakeDeadline = deadline
 	}
-	newHash, err := writeReservation(v, name, r, hash)
+	newHash, err := writeReservation(p, name, r, hash)
 	if err != nil {
 		if errors.Is(err, varvigcli.ErrCAS) {
 			// Another connector took it between the read and the write. Report
 			// what it is now, so the loser knows who is acting rather than only
 			// that it lost.
-			if now, nowHash, lerr := loadReservation(v, name); lerr == nil {
+			if now, nowHash, lerr := loadReservation(p, name); lerr == nil {
 				return Claim{Reservation: now, Hash: nowHash},
 					fmt.Errorf("%w: %s was taken by %s", ErrNotOffered, short(key), now.TakenBy)
 			}
@@ -166,7 +166,7 @@ func Take(v varvigcli.Varvig, cellID, key, connectorID string, at, deadline int6
 // a connector that guesses here is worse than one that goes quiet.
 //
 // actual is what it really cost; zero means as quoted.
-func Report(v varvigcli.Varvig, c Claim, connectorID string, happened bool, externalRef string, actual float64, detail string, at int64) (Claim, error) {
+func Report(p varvigcli.ProjectRepo, c Claim, connectorID string, happened bool, externalRef string, actual float64, detail string, at int64) (Claim, error) {
 	r := c.Reservation
 	if r.TakenBy == "" || r.TakenBy != connectorID {
 		return c, fmt.Errorf("%w: %s holds %s, not %q", ErrNotHolder, r.TakenBy, short(r.Key), connectorID)
@@ -190,7 +190,7 @@ func Report(v varvigcli.Varvig, c Claim, connectorID string, happened bool, exte
 	// Happened is carried in the record rather than inferred from ExternalRef,
 	// so a rejection and a success are distinguishable without reading a string.
 	r.Happened = happened
-	hash, err := update(v, r, c.Hash)
+	hash, err := update(p, r, c.Hash)
 	if err != nil {
 		return c, err
 	}
@@ -200,11 +200,11 @@ func Report(v varvigcli.Varvig, c Claim, connectorID string, happened bool, exte
 
 // Reported lists this cell's reservations awaiting settlement — the cell's half
 // of the exchange, and the mirror of Awaiting.
-func Reported(v varvigcli.Varvig, cellID string) ([]Reservation, error) {
+func Reported(p varvigcli.ProjectRepo, cellID string) ([]Reservation, error) {
 	if err := cell.CheckID(cellID); err != nil {
 		return nil, err
 	}
-	all, err := allReservations(v)
+	all, err := allReservations(p)
 	if err != nil {
 		return nil, err
 	}
@@ -223,14 +223,14 @@ func Reported(v varvigcli.Varvig, cellID string) ([]Reservation, error) {
 // what happened; the cell decides what that costs, and the lease bounds it —
 // Convert refuses an actual beyond the allocation, so a connector reporting a
 // wild figure is contained by an amount the overseer chose.
-func SettleReported(v varvigcli.Varvig, c Claim, at int64) (Claim, error) {
+func SettleReported(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, c Claim, at int64) (Claim, error) {
 	if c.Reservation.State != StateReported {
 		return c, fmt.Errorf("effect: %s is %s, not a report awaiting settlement", short(c.Reservation.Key), c.Reservation.State)
 	}
 	if c.Reservation.Happened {
-		return Settle(v, withState(c, StatePending), c.Reservation.ExternalRef, c.Reservation.Actual, at)
+		return Settle(f, p, withState(c, StatePending), c.Reservation.ExternalRef, c.Reservation.Actual, at)
 	}
-	return Fail(v, withState(c, StatePending), c.Reservation.Detail, at)
+	return Fail(f, p, withState(c, StatePending), c.Reservation.Detail, at)
 }
 
 // withState returns the claim with its reservation moved to s, so the settle
@@ -245,8 +245,8 @@ func withState(c Claim, s State) Claim {
 //
 // A connector serves a capability across whichever cells hold leases for it, so
 // its inbox cannot be scoped to one cell's prefix the way Pending is.
-func allReservations(v varvigcli.Varvig) ([]Reservation, error) {
-	refs, err := v.Refs()
+func allReservations(p varvigcli.ProjectRepo) ([]Reservation, error) {
+	refs, err := p.Refs()
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +256,7 @@ func allReservations(v varvigcli.Varvig) ([]Reservation, error) {
 		if !strings.HasPrefix(ref.Name, cell.ReservationPrefix) {
 			continue
 		}
-		r, _, err := loadReservation(v, ref.Name)
+		r, _, err := loadReservation(p, ref.Name)
 		if err != nil {
 			bad = append(bad, fmt.Sprintf("%s: %v", ref.Name, err))
 			continue
