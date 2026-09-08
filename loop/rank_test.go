@@ -12,9 +12,11 @@ import (
 func rankCell(t *testing.T) (*Cell, *varvigcli.Fake) {
 	t.Helper()
 	v := varvigcli.NewFake("mini-a")
+	fr, pr := varvigcli.Collapsed(v)
 	return &Cell{
 		Capabilities: cell.Capabilities{CellID: "mini-a"},
-		V:            v,
+		Factory:      fr,
+		Project:      pr,
 		Log:          func(string) {},
 	}, v
 }

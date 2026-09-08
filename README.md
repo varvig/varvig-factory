@@ -81,6 +81,13 @@ varvig-factory run                   # loop until interrupted
 `init --profile micro` writes a cell that **verifies and builds but does not
 attempt**. That is the recommended default and the subject of the next section.
 
+The config it writes is *collapsed*: one repository serving both the
+coordination and the project role, which is correct for a factory with a single
+codebase. Set `factory_repo` and `factory_upstream` when there is a second
+project — that is the point at which each project growing its own copy of what
+the cell may spend stops being harmless. See "One factory repository, N project
+repositories" below.
+
 Run `varvig-factory` with no arguments for the full command list.
 
 ## Cell classes, and flat factories
@@ -308,6 +315,7 @@ versus stale.**
 |---|---|---|
 | What it is | a **shared ceiling** across every cell under one overseer | an **exclusive allocation** to one cell |
 | Ref | `refs/factory/envelopes/<overseer-id>` | `refs/factory/leases/<cell-id>/<capability>` |
+| Which repository | the factory's coordination repo | the factory's coordination repo |
 | Enforceable from a stale view? | no — another cell may have spent it | yes — nobody else can spend it |
 | Spendable offline | no | **yes, indefinitely** |
 
@@ -640,15 +648,17 @@ CELL.md              the cell contract — normative, read this first
 cell/                the contract in code: names, capabilities, evidence,
                      environment + its hash, claims. No dependencies on anything.
 varvigcli/           the Varvig interface + an Exec adapter over the public CLI,
-                     and an in-memory Fake that models refs-with-CAS, notes,
-                     the speculation pool and a partitionable upstream
+                     the FactoryRepo/ProjectRepo handles that keep the two
+                     repository kinds apart, and an in-memory Fake that models
+                     refs-with-CAS, notes, the speculation pool and a
+                     partitionable upstream
 inference/           model-runtime seam
 sandbox/             build-sandbox seam
 artifact/            artifact-store seam
 budget/              spend caps, halt behaviour, storage-pressure relief
 authority/           envelopes and leases: shared ceilings versus exclusive
                      allocations, what a stale view still permits, and the refs
-                     they live in
+                     they live in — all of it in the coordination repo
 effect/              effectful, non-regenerable capabilities — the refusals,
                      reserve/execute/settle over a reservation ref, and the
                      executor seam (with a refusing default and a counting fake)
@@ -758,6 +768,68 @@ are mutually exclusive.
 me a circuit board" by writing code is the failure mode that rule exists to
 prevent, so the requirement survives with the reason attached and the ticket is
 skipped rather than reinterpreted.
+
+## One factory repository, N project repositories
+
+A cell holds full replicas of **two kinds** of repository — not a private repo
+of its own, and not a shared worker against one repo.
+
+| Repository | Scope | Holds |
+|---|---|---|
+| **Coordination**, one per factory | the factory | membership and `allowed_keys`, cell capability objects, interface schemas, overseer envelopes, per-cell leases |
+| **Project**, one per codebase | one codebase | tickets, claims, attempts, evidence, environment descriptors, `artifact-ref` objects, effectful reservations |
+
+The split is about authority, not tidiness. Envelopes and leases answer "what may
+this cell spend", and that question has exactly one authoritative answer per
+factory. Put them in the project repos and every project grows its own plausible
+copy: each looks correct on its own, the sum exceeds the envelope, and nothing in
+the system is positioned to notice.
+
+**The two kinds are distinct Go types**, and the functions that write a lease
+take the coordination one. Both are reached through the same `Varvig` surface, so
+nothing but the type system stops a caller passing either — and the one mistake
+that matters here is discovered while reconciling a bill. Handing a project
+replica to something that writes a lease is a compile error.
+
+For a factory with a single codebase, one repository may serve both roles
+(`varvigcli.Collapsed`). The roles stay two even then, so a call site that says
+which repository it means keeps saying so when a second project shows up.
+
+### Two writes, and the order is the safety property
+
+A reservation lives in a project repo and the lease it spends from lives in the
+coordination repo, so every settlement is two writes to two repositories with no
+shared transaction — not by oversight, but because two independent
+compare-and-swaps cannot have one. The lease is written first, always:
+
+| Second write never lands | What is left | Recovery |
+|---|---|---|
+| after a hold is taken | headroom held for a key nobody claimed | the expiry returns it |
+| after spend is recorded | the lease over-reports this cell's spend | an overseer reading the lease corrects it |
+| after a hold is released | a record still open against a lease that no longer holds for it | the double-release guard makes a retry loud; a principal resolves it |
+
+The unreachable state is a reservation saying an irreversible action is settled
+against a lease with no record of paying for it. Every other failure here is
+recoverable; that one is not, so the ordering exists to buy exactly it. Three
+tests take one replica's writes away mid-settlement and assert the surviving
+state — reversing the order makes two of them fail with the double-spend
+condition named in the message.
+
+### Reachability now answers two questions
+
+One repository made one reachability answer serve both. Two make them separate,
+and they were never the same question:
+
+- **The project peer** decides whether the cell is looking at current *work*.
+  Unreachable is the offline mode: a tighter budget, claims marked offline, work
+  continuing from the view it has.
+- **The coordination peer** decides whether the cell's *trust state* is current.
+  Membership and `allowed_keys` live there, so it is that peer, and only that
+  one, which the promotion gate reads.
+
+A cell cut off from its project peer may still promote what it already holds. A
+cell cut off from the coordination peer may not — it cannot know who is still
+allowed to sign.
 
 ## One namespace root
 
@@ -943,7 +1015,7 @@ with the contract-level detail.
 
 | Gap | What is missing |
 |---|---|
-| **No rendezvous set** (§3.0) | The loop takes a single `upstream` address. It is not a coordinator, but "any member may act as a rendezvous, several at once" is not implemented, so a factory does not yet keep working when that particular member is unreachable. |
+| **No rendezvous set** (§3.0) | The loop now takes one address *per repository kind* — a project peer and a coordination peer — which is the shape the split needs, but each is still a single address. Neither is a coordinator; nothing is read from either that a peer could not serve. What is missing is "any member may act as a rendezvous, several at once", so a factory still stops syncing a repository when that repository's one configured peer is unreachable. |
 | **No interface registry** (§2.1) | A capability reference already binds to the interface *hash*, which is the part that matters for safety — a ticket, a cell's configuration and a lease must all name the same hash before anything is ordered. What is missing is the registry the hash points into: interfaces published as varvig objects and resolvable by hash. |
 | **No derived reputation** (§2.2) | Capability claims are advisory and standing should be derived from promotion history. Only the agreement-rate metric is derived today, and it is per scope rather than per cell. |
 | **Money is a `float64`** | Amounts accumulate representation error — 1000 − 320 − 355.40 is 44.60000000000002 — and refusals round for display. No decision compares amounts for equality, so nothing turns on it today, but minor units are the right representation for a system that spends money. |

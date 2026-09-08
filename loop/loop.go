@@ -63,16 +63,42 @@ type Check struct {
 // Cell is a configured Factory cell.
 type Cell struct {
 	Capabilities cell.Capabilities
-	V            varvigcli.Varvig
-	Inference    inference.Runtime
-	Sandbox      sandbox.Sandbox
-	Artifacts    artifact.Store
-	Ledger       *budget.Ledger
-	Promoter     *promote.Promoter
 
-	// Upstream is the peer address to sync with. Empty means a single-cell
-	// deployment with no upstream, which is legitimate and not an error.
+	// Factory is the replica of the factory-coordination repository: who the
+	// factory is and what it may spend. A cell replicates exactly one.
+	Factory varvigcli.FactoryRepo
+	// Project is the replica of the project repository this cell works on: the
+	// tickets, attempts, evidence and reservations for one codebase.
+	//
+	// The two are separate because authority has one authoritative home per
+	// factory and work has one per codebase. For a factory with a single
+	// project, varvigcli.Collapsed builds both over one replica — the roles stay
+	// two even when the repository is one.
+	Project varvigcli.ProjectRepo
+
+	Inference inference.Runtime
+	Sandbox   sandbox.Sandbox
+	Artifacts artifact.Store
+	Ledger    *budget.Ledger
+	Promoter  *promote.Promoter
+
+	// Upstream is the peer address the *project* replica syncs with. Empty means
+	// a single-cell deployment with no upstream, which is legitimate and not an
+	// error.
 	Upstream string
+	// FactoryUpstream is the peer address the *factory* replica syncs with.
+	//
+	// It is separate because the two repositories are separate: a cell working
+	// three projects dials three project peers and one coordination peer.
+	//
+	// There is deliberately no fallback to Upstream. A cell with two real
+	// repositories and only Upstream set would fetch its authority from its
+	// project peer, which is the wrong peer for "what may I spend" — and a
+	// default that is right for one deployment shape and silently wrong for
+	// another is worse than no default. A collapsed deployment sets both fields
+	// to the same address and says so. Empty means this replica has no peer,
+	// which is the single-cell case and not an error.
+	FactoryUpstream string
 	// Branch is the branch to fetch and push.
 	Branch string
 	// Checks are the commands that produce evidence.
@@ -192,8 +218,11 @@ func (c *Cell) Validate(ctx context.Context) error {
 	if err := c.Capabilities.Validate(); err != nil {
 		return err
 	}
-	if c.V == nil {
-		return errors.New("loop: no varvig client configured")
+	if c.Project.Varvig == nil {
+		return errors.New("loop: no project replica configured; a cell works on a codebase and needs its repository")
+	}
+	if c.Factory.Varvig == nil {
+		return errors.New("loop: no factory replica configured; a cell's authority to spend lives in the coordination repository, and a cell that cannot read it cannot know what it may do. For a single-project factory, varvigcli.Collapsed serves both roles from one repository")
 	}
 	if c.Ledger == nil {
 		return errors.New("loop: no budget ledger configured; a cell without a declared budget is not permitted (§7)")
@@ -233,7 +262,13 @@ func (c *Cell) PublishCapabilities() error {
 	if err != nil {
 		return err
 	}
-	id, err := c.V.PutBlob(payload)
+	// The capabilities object is coordination-repo state (CELL.md §2.1): it says
+	// what this cell *is* within the factory, not anything about a codebase, and
+	// the peers that read it — an overseer sizing a lease, another cell deciding
+	// whether this one is equipped to verify its work — are asking a
+	// factory-wide question. Publishing it per project would give one cell as
+	// many advertised identities as it has projects.
+	id, err := c.Factory.PutBlob(payload)
 	if err != nil {
 		return err
 	}
@@ -241,14 +276,14 @@ func (c *Cell) PublishCapabilities() error {
 	if err != nil {
 		return err
 	}
-	old, err := c.V.ResolveRef(ref)
+	old, err := c.Factory.ResolveRef(ref)
 	if err != nil && !errors.Is(err, varvigcli.ErrNoRef) {
 		return err
 	}
 	if old == id {
 		return nil
 	}
-	return c.V.UpdateRef(ref, id, old)
+	return c.Factory.UpdateRef(ref, id, old)
 }
 
 // Run loops until the context is cancelled, pausing interval between passes.
@@ -371,12 +406,19 @@ func (c *Cell) Once(ctx context.Context) (Report, error) {
 		rep.Attempts = append(rep.Attempts, result)
 	}
 
-	// Step 9: sync upstream.
+	// Step 9: sync both replicas upstream.
+	//
+	// The factory push is not optional bookkeeping. Settled spend is written to
+	// the lease, the lease lives in the coordination repo, and an overseer that
+	// never receives it has no record that money was spent — so a cell that
+	// reports work but not spend is worse than one that reports neither.
 	if !rep.Offline {
-		if err := c.V.Push(c.Upstream, c.branch()); err != nil {
+		if err := c.pushFactory(); err != nil {
+			rep.Errors = append(rep.Errors, err.Error())
+		}
+		if err := c.Project.Push(c.Upstream, c.branch()); err != nil {
 			if errors.Is(err, varvigcli.ErrUnreachable) {
 				rep.Offline = true
-				c.sync.Reachable = false
 			} else {
 				// A refused push is upstream having diverged. The local state is
 				// intact and immutable; the next pass will fetch and reconcile.
@@ -407,43 +449,88 @@ func (c *Cell) Once(ctx context.Context) (Report, error) {
 	return rep, nil
 }
 
-// fetch is step 1. It returns whether the cell is offline.
+// fetch is step 1. It syncs both replicas and returns whether the cell is
+// offline from its *project* peer.
+//
+// # The split gives "offline" two meanings, and they gate different things
+//
+// One handle made one reachability answer serve two questions. Two handles
+// separate them, and they were never the same question:
+//
+//   - **Project reachability** answers "am I looking at current work?" A cell
+//     that cannot reach its project peer is working from a stale view of
+//     tickets, claims and attempts. That is the offline *mode* of §5.2 — a
+//     tighter budget and a claim marked as made offline, not a fault.
+//   - **Factory reachability** answers "is my trust state current?" Membership,
+//     allowed_keys and envelopes all live in the coordination repo, so it is
+//     that replica's currency, and only that one, which §4.3b's promotion gate
+//     is about.
+//
+// So c.sync — which promotion and effect.Check read — tracks the factory
+// replica, and the returned offline flag tracks the project replica. A cell cut
+// off from its project peer but current with the factory may still promote work
+// it already has; a cell current with its project peer but cut off from the
+// factory may not, because it cannot know who is still allowed to sign.
+//
+// Neither upstream being configured is not offline and not stale: there is
+// nothing to be disconnected from, and treating it as either would apply the
+// offline budget forever and make promotion impossible for the simplest working
+// configuration (§4.3b).
 func (c *Cell) fetch() bool {
-	if c.Upstream == "" {
-		// No upstream configured is not offline: there is nothing to be
-		// disconnected from, and treating it as offline would apply the tighter
-		// offline budget to a single-cell deployment forever — and would make
-		// promotion impossible for the simplest working configuration (§4.3b).
+	c.syncFactory()
+	return c.syncProject()
+}
+
+// syncFactory brings the coordination replica up to date and records what that
+// established about the currency of trust state.
+func (c *Cell) syncFactory() {
+	if c.FactoryUpstream == "" {
 		c.sync = authority.Sync{Configured: false}
-		return false
+		return
 	}
-	if err := c.V.Fetch(c.Upstream, c.branch()); err != nil {
-		if errors.Is(err, varvigcli.ErrUnreachable) {
-			// Keep the previous successful sync time: the cell is behind, not
-			// amnesiac, and how far behind is what a max-age bound reads.
-			c.sync.Configured, c.sync.Reachable = true, false
-			c.logf("upstream %s unreachable; continuing offline — the cell keeps proposing but will not promote (§4.3b)", c.Upstream)
-			return true
-		}
-		// A fetch that failed for some other reason also leaves trust state
-		// unconfirmed. Treating it as fresh because the error was unfamiliar
-		// would be the wrong way round.
+	if err := c.Factory.Fetch(c.FactoryUpstream, c.branch()); err != nil {
+		// Either way trust state is unconfirmed. Keep any previous successful
+		// sync time: the cell is behind, not amnesiac, and how far behind is
+		// what a max-age bound reads.
 		c.sync.Configured, c.sync.Reachable = true, false
-		c.logf("fetch from %s failed: %v", c.Upstream, err)
-		return false
+		if errors.Is(err, varvigcli.ErrUnreachable) {
+			c.logf("factory peer %s unreachable; trust state is stale — the cell keeps working but will not promote (§4.3b)", c.FactoryUpstream)
+			return
+		}
+		// A failure for some other reason also leaves trust unconfirmed.
+		// Treating it as fresh because the error was unfamiliar would be the
+		// wrong way round.
+		c.logf("factory fetch from %s failed: %v", c.FactoryUpstream, err)
+		return
 	}
 	c.sync = authority.Sync{Configured: true, Reachable: true, At: c.now()}
+}
+
+// syncProject brings the project replica up to date and reports whether the cell
+// is offline from it.
+func (c *Cell) syncProject() bool {
+	if c.Upstream == "" {
+		return false
+	}
+	if err := c.Project.Fetch(c.Upstream, c.branch()); err != nil {
+		if errors.Is(err, varvigcli.ErrUnreachable) {
+			c.logf("project peer %s unreachable; continuing offline — the cell keeps proposing from the view it has (§5.2)", c.Upstream)
+			return true
+		}
+		c.logf("project fetch from %s failed: %v", c.Upstream, err)
+		return false
+	}
 	return false
 }
 
 // observe is step 2: the open tickets, with the state the policy needs. Every
 // field comes from varvig.
 func (c *Cell) observe() ([]claim.Ticket, error) {
-	ids, err := c.V.TicketIDs()
+	ids, err := c.Project.TicketIDs()
 	if err != nil {
 		return nil, err
 	}
-	refs, err := c.V.Refs()
+	refs, err := c.Project.Refs()
 	if err != nil {
 		return nil, err
 	}
@@ -455,19 +542,19 @@ func (c *Cell) observe() ([]claim.Ticket, error) {
 	out := make([]claim.Ticket, 0, len(ids))
 	for _, id := range ids {
 		t := claim.Ticket{ID: id, Object: objects["refs/varvig/tickets/"+id]}
-		if t.Spec, err = c.V.Spec(id); err != nil {
+		if t.Spec, err = c.Project.Spec(id); err != nil {
 			c.logf("could not read spec for %s: %v", shortID(id), err)
 			continue
 		}
-		if t.Scope, err = c.V.Scope(id); err != nil {
+		if t.Scope, err = c.Project.Scope(id); err != nil {
 			c.logf("could not read scope for %s: %v", shortID(id), err)
 			continue
 		}
-		if t.Status, err = c.V.TicketStatus(id); err != nil {
+		if t.Status, err = c.Project.TicketStatus(id); err != nil {
 			c.logf("could not read status for %s: %v", shortID(id), err)
 			continue
 		}
-		if t.Blockers, err = c.V.Blockers(id); err != nil {
+		if t.Blockers, err = c.Project.Blockers(id); err != nil {
 			c.logf("could not read blockers for %s: %v", shortID(id), err)
 			continue
 		}
@@ -493,7 +580,7 @@ func (c *Cell) observe() ([]claim.Ticket, error) {
 // the order it had, because an ordering hint that cannot be fetched should cost
 // throughput and nothing else.
 func (c *Cell) rank(tickets []claim.Ticket) []claim.Ticket {
-	ranked, err := c.V.Rank()
+	ranked, err := c.Project.Rank()
 	if err != nil {
 		c.logf("could not read core's ticket ranking, working in listed order: %v", err)
 		return tickets
@@ -528,7 +615,7 @@ func (c *Cell) rank(tickets []claim.Ticket) []claim.Ticket {
 // the repository. Both come from ref names, which is why the naming rules are
 // part of the contract rather than an implementation detail (CELL.md §2).
 func (c *Cell) readClaimState() (map[string][]cell.Claim, map[string]int, error) {
-	refs, err := c.V.Refs()
+	refs, err := c.Project.Refs()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -542,7 +629,7 @@ func (c *Cell) readClaimState() (map[string][]cell.Claim, map[string]int, error)
 			if !ok || cellID == c.Capabilities.CellID {
 				continue
 			}
-			payload, err := c.V.ReadBlob(r.Hash)
+			payload, err := c.Project.ReadBlob(r.Hash)
 			if err != nil {
 				continue
 			}
@@ -581,7 +668,7 @@ func (c *Cell) writeClaim(t claim.Ticket, attempt int, offline bool) error {
 	if err != nil {
 		return err
 	}
-	id, err := c.V.PutBlob(payload)
+	id, err := c.Project.PutBlob(payload)
 	if err != nil {
 		return err
 	}
@@ -589,11 +676,11 @@ func (c *Cell) writeClaim(t claim.Ticket, attempt int, offline bool) error {
 	if err != nil {
 		return err
 	}
-	old, err := c.V.ResolveRef(ref)
+	old, err := c.Project.ResolveRef(ref)
 	if err != nil && !errors.Is(err, varvigcli.ErrNoRef) {
 		return err
 	}
-	return c.V.UpdateRef(ref, id, old)
+	return c.Project.UpdateRef(ref, id, old)
 }
 
 // attempt runs steps 4 through 8 for one ticket.
@@ -607,12 +694,12 @@ func (c *Cell) attempt(ctx context.Context, t claim.Ticket, n int, offline bool)
 	if c.WorkDir != "" {
 		dir = filepath.Join(c.WorkDir, fmt.Sprintf("%s-%d", sanitize(t.ID), n))
 	}
-	task, err := c.V.TaskStart(varvigcli.TaskRequest{Scope: scope, TTL: c.TaskTTL, Dir: dir})
+	task, err := c.Project.TaskStart(varvigcli.TaskRequest{Scope: scope, TTL: c.TaskTTL, Dir: dir})
 	if err != nil {
 		return AttemptResult{}, fmt.Errorf("task start: %w", err)
 	}
 	defer func() {
-		if err := c.V.TaskStop(task.ID); err != nil {
+		if err := c.Project.TaskStop(task.ID); err != nil {
 			c.logf("could not revoke task %s: %v", task.ID, err)
 		}
 	}()
@@ -643,13 +730,13 @@ func (c *Cell) attempt(ctx context.Context, t claim.Ticket, n int, offline bool)
 
 	change := ""
 	if len(written) > 0 {
-		if change, err = c.V.Commit(task.Dir, fmt.Sprintf("factory %s attempt %d for %s", c.Capabilities.CellID, n, shortID(t.ID))); err != nil {
+		if change, err = c.Project.Commit(task.Dir, fmt.Sprintf("factory %s attempt %d for %s", c.Capabilities.CellID, n, shortID(t.ID))); err != nil {
 			return AttemptResult{}, fmt.Errorf("commit: %w", err)
 		}
 		// Record the change as a speculation candidate. The pool, the scoring
 		// and the selection are varvig's (TICKETS.md §3.3); Factory contributes
 		// candidates to it.
-		if err := c.V.SpecAdd(t.ID, change); err != nil {
+		if err := c.Project.SpecAdd(t.ID, change); err != nil {
 			c.logf("could not add %s to the speculation pool: %v", shortHash(change), err)
 		}
 	}
@@ -720,7 +807,7 @@ func (c *Cell) writeAttempt(att cell.Attempt) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	id, err := c.V.PutBlob(payload)
+	id, err := c.Project.PutBlob(payload)
 	if err != nil {
 		return "", err
 	}
@@ -728,7 +815,7 @@ func (c *Cell) writeAttempt(att cell.Attempt) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := c.V.UpdateRef(ref, id, ""); err != nil {
+	if err := c.Project.UpdateRef(ref, id, ""); err != nil {
 		return "", fmt.Errorf("writing attempt %s: %w", ref, err)
 	}
 	return ref, nil
@@ -749,12 +836,12 @@ func (c *Cell) pin(change string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := c.V.ResolveRef(ref); err == nil {
+	if _, err := c.Project.ResolveRef(ref); err == nil {
 		return nil
 	} else if !errors.Is(err, varvigcli.ErrNoRef) {
 		return err
 	}
-	return c.V.UpdateRef(ref, change, "")
+	return c.Project.UpdateRef(ref, change, "")
 }
 
 // runChecks executes the cell's checks and produces evidence plus the
@@ -856,7 +943,7 @@ func (c *Cell) recordEnvironment(target string, env cell.Environment) (string, e
 	}
 	// Environments deduplicate by hash: thousands of evidence records sharing an
 	// environment should not write thousands of identical notes.
-	existing, err := c.V.Notes(target, cell.NoteEnvironment)
+	existing, err := c.Project.Notes(target, cell.NoteEnvironment)
 	if err == nil {
 		for _, n := range existing {
 			if string(n.Payload) == string(payload) {
@@ -864,7 +951,7 @@ func (c *Cell) recordEnvironment(target string, env cell.Environment) (string, e
 			}
 		}
 	}
-	return hash, c.V.AddNote(target, cell.NoteEnvironment, payload)
+	return hash, c.Project.AddNote(target, cell.NoteEnvironment, payload)
 }
 
 func (c *Cell) recordEvidence(target string, ev cell.Evidence) error {
@@ -875,7 +962,7 @@ func (c *Cell) recordEvidence(target string, ev cell.Evidence) error {
 	if err != nil {
 		return err
 	}
-	return c.V.AddNote(target, cell.NoteEvidence, payload)
+	return c.Project.AddNote(target, cell.NoteEvidence, payload)
 }
 
 // recordArtifacts is step 6: write artifact-refs for any binary outputs.
@@ -941,7 +1028,7 @@ func (c *Cell) recordArtifacts(ctx context.Context, dir, taskID, change string) 
 // degradation is logged every time, naming what is lost.
 func (c *Cell) attachArtifact(taskID, change string, ref cell.ArtifactRef) error {
 	if taskID != "" {
-		id, err := c.V.AttachArtifact(taskID, ref)
+		id, err := c.Project.AttachArtifact(taskID, ref)
 		switch {
 		case err == nil:
 			c.logf("attached artifact %s as %s (produced by %s)",
@@ -968,7 +1055,7 @@ func (c *Cell) attachArtifact(taskID, change string, ref cell.ArtifactRef) error
 	if err != nil {
 		return err
 	}
-	return c.V.AddNote(target, cell.NoteArtifact, payload)
+	return c.Project.AddNote(target, cell.NoteArtifact, payload)
 }
 
 // readContext reads the ticket's read set out of the checkout, as supporting
@@ -1042,7 +1129,7 @@ func (c *Cell) relieveStorage() error {
 	if perr != nil {
 		return fmt.Errorf("releasing pins: %w", perr)
 	}
-	report, gerr := c.V.GC(true)
+	report, gerr := c.Project.GC(true)
 	if gerr != nil {
 		return fmt.Errorf("gc: %w", gerr)
 	}
@@ -1187,4 +1274,27 @@ func (r *casReleaser) Candidates() ([]string, error) {
 
 func (r *casReleaser) Release(contentHash string) error {
 	return r.cas.Release(context.Background(), cell.ArtifactRef{ContentHash: contentHash})
+}
+
+// pushFactory sends this cell's coordination-repo writes — settled leases above
+// all — to the factory peer.
+//
+// An unreachable factory peer marks trust state stale rather than being
+// reported as an error: not having reached the overseer yet is the ordinary
+// offline case, and the spend is already durable locally. What it must never do
+// is pass silently, because the lease is the only record that money was spent.
+func (c *Cell) pushFactory() error {
+	if c.FactoryUpstream == "" {
+		return nil
+	}
+	err := c.Factory.Push(c.FactoryUpstream, c.branch())
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, varvigcli.ErrUnreachable) {
+		c.sync.Reachable = false
+		c.logf("factory peer %s unreachable on push; spend recorded locally is not yet reported to the overseer", c.FactoryUpstream)
+		return nil
+	}
+	return fmt.Errorf("factory push: %w", err)
 }

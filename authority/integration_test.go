@@ -19,7 +19,7 @@ import (
 // `refs/envelopes/`, `refs/leases/` and `refs/reservations/` at all — the
 // namespaces are new, and core reserves some prefixes for itself — and whether a
 // create-only publish and a CAS settlement behave the way the Fake models them.
-func realRepo(t *testing.T) varvigcli.Exec {
+func realRepo(t *testing.T) varvigcli.FactoryRepo {
 	t.Helper()
 	bin, err := exec.LookPath("varvig")
 	if err != nil {
@@ -34,7 +34,7 @@ func realRepo(t *testing.T) varvigcli.Exec {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("varvig init: %v: %s", err, out)
 	}
-	return varvigcli.Exec{Bin: bin, Dir: repo}
+	return varvigcli.FactoryRepo{Varvig: varvigcli.Exec{Bin: bin, Dir: repo}}
 }
 
 func TestIntegrationEnvelopeAndLeaseRefsAreAccepted(t *testing.T) {

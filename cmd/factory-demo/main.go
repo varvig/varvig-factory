@@ -213,7 +213,7 @@ func run() error {
 	if err := mini.sw.EnableAutonomous("src/"); err != nil {
 		return err
 	}
-	rate, err := agreement.RateFor(mini.v, "src/")
+	rate, err := agreement.RateFor(mini.project, "src/")
 	if err != nil {
 		return err
 	}
@@ -224,11 +224,11 @@ func run() error {
 	// deployment this is weeks of ordinary reviewed work, which is the point.
 	for i := 0; i < agreement.DefaultMinObservations; i++ {
 		o := agreement.Observe("src/", ticket, "top", "top", clock.Add(time.Duration(i)*time.Second))
-		if err := agreement.Record(mini.v, ticketO, o); err != nil {
+		if err := agreement.Record(mini.project, ticketO, o); err != nil {
 			return err
 		}
 	}
-	rate, err = agreement.RateFor(mini.v, "src/")
+	rate, err = agreement.RateFor(mini.project, "src/")
 	if err != nil {
 		return err
 	}
@@ -332,11 +332,11 @@ func run() error {
 
 	// Both live in the repository, under their own ref prefixes, signed and
 	// CAS-updated like anything else. Nothing about this asks varvig to change.
-	must1(authority.PublishEnvelope(mini.v, envelope, ""))
-	must1(authority.PublishLease(mini.v, lease, ""))
+	must1(authority.PublishEnvelope(mini.factory, envelope, ""))
+	must1(authority.PublishLease(mini.factory, lease, ""))
 	fmt.Printf("  %s -> %s\n", must1(cell.EnvelopeRef(envelope.Overseer)),
 		short(must1(mini.v.ResolveRef(must1(cell.EnvelopeRef(envelope.Overseer))))))
-	issued, _ := must2(authority.LoadLease(mini.v, "mini-a", "pcb-fabrication@1"))
+	issued, _ := must2(authority.LoadLease(mini.factory, "mini-a", "pcb-fabrication@1"))
 	fmt.Printf("  %s\n", issued)
 
 	boards := effect.Capability{
@@ -366,9 +366,9 @@ func run() error {
 	// Reserve, execute, settle. The key is claimed in a ref before the effect is
 	// attempted, create-only — and the same write holds the lease headroom, so a
 	// second pending order cannot pass the same headroom check.
-	current, readAt := must2(authority.LoadLease(mini.v, "mini-a", "pcb-fabrication@1"))
+	current, readAt := must2(authority.LoadLease(mini.factory, "mini-a", "pcb-fabrication@1"))
 	held := authority.Grant{Envelope: envelope, Lease: &current, LeaseHash: readAt}
-	claim := must1(effect.Reserve(mini.v, order, "mini-a", held, clock.Unix(), 3600))
+	claim := must1(effect.Reserve(mini.factory, mini.project, order, "mini-a", held, clock.Unix(), 3600))
 	fmt.Printf("  reserved: %s\n", claim.Reservation)
 	fmt.Printf("  the lease now holds %.2f EUR against it, leaving %.2f of %.2f\n",
 		claim.Lease.Reserved, claim.Lease.Headroom(), claim.Lease.Amount)
@@ -378,19 +378,19 @@ func run() error {
 	// would wave it through and the two together would exceed the lease.
 	competing := order
 	competing.Task, competing.Amount = ticket+"-b", 800
-	_, tooMuch := effect.Reserve(mini.v, competing, "mini-a",
+	_, tooMuch := effect.Reserve(mini.factory, mini.project, competing, "mini-a",
 		authority.Grant{Envelope: envelope, Lease: &claim.Lease, LeaseHash: claim.LeaseHash}, clock.Unix()+1, 3600)
 	fmt.Printf("  a second 800 EUR order while the first is pending: %v\n", tooMuch != nil)
 
 	// The order goes through, and settlement converts the hold into spend at the
 	// price actually charged rather than the one quoted.
-	claim = must1(effect.Settle(mini.v, claim, "PO-90210", 355.40, clock.Add(time.Minute).Unix()))
+	claim = must1(effect.Settle(mini.factory, mini.project, claim, "PO-90210", 355.40, clock.Add(time.Minute).Unix()))
 	fmt.Printf("  settled: %.2f EUR spent of %.2f, %.2f left (%s)\n",
 		claim.Lease.Spent, claim.Lease.Amount, claim.Lease.Headroom(), claim.Reservation.Detail)
 
 	// The same action again is refused by varvig's ordinary ref CAS, and told
 	// what happened rather than placing a second order.
-	_, repeat := effect.Reserve(mini.v, retry, "mini-a",
+	_, repeat := effect.Reserve(mini.factory, mini.project, retry, "mini-a",
 		authority.Grant{Envelope: envelope, Lease: &claim.Lease, LeaseHash: claim.LeaseHash}, clock.Add(time.Hour).Unix(), 3600)
 	fmt.Printf("  the same action reserved again: %v\n", repeat)
 
@@ -398,7 +398,7 @@ func run() error {
 	// *headroom*: what is spent is gone, and what is held may already be an order
 	// at the far end. Neither is still allocatable.
 	fmt.Printf("  outstanding exposure for pcb-fabrication@1: %.2f EUR\n",
-		authority.Exposure(must1(authority.Leases(mini.v, "")))["pcb-fabrication@1"])
+		authority.Exposure(must1(authority.Leases(mini.factory, "")))["pcb-fabrication@1"])
 	lease = claim.Lease
 
 	// The overseer tightens the envelope to 400 EUR — below what this lease still
@@ -408,7 +408,7 @@ func run() error {
 	tightened.Ceilings = []authority.Ceiling{{
 		Capability: "pcb-fabrication@1", Spend: 400, Unit: "EUR", Quantity: 100, RatePerDay: 4,
 	}}
-	must1(authority.PublishEnvelope(mini.v, tightened,
+	must1(authority.PublishEnvelope(mini.factory, tightened,
 		must1(mini.v.ResolveRef(must1(cell.EnvelopeRef(envelope.Overseer))))))
 	bounded := must1(authority.Grant{Envelope: tightened, Lease: &claim.Lease}.Bounded())
 	fmt.Printf("  --- overseer tightens the envelope to 400 EUR ---\n")
@@ -457,12 +457,12 @@ func run() error {
 	// through a shared upstream, which is what makes the partition in phase 3
 	// real rather than simulated.
 	micro.v.AddTicket(boardTicket, boardSpec, varvigcli.Scope{Reads: []string{"hardware"}, Writes: []string{"hardware"}}, "approved")
-	must1(authority.PublishEnvelope(micro.v, envelope, ""))
+	must1(authority.PublishEnvelope(micro.factory, envelope, ""))
 
 	// A fresh lease, since the one above is nearly spent, and a fake executor
 	// standing in for the fab. The fake counts how many times the effect really
 	// happened, which is the number every guard in this system is about.
-	must1(authority.PublishLease(micro.v, authority.Lease{
+	must1(authority.PublishLease(micro.factory, authority.Lease{
 		CellID: "micro-b", Capability: "pcb-fabrication@1", Overseer: "overseer-a",
 		Envelope: "1e20abc", Amount: 500, Unit: "EUR", Quantity: 10, IssuedAt: clock.Unix(),
 	}, ""))
@@ -489,7 +489,7 @@ func run() error {
 	fmt.Printf("  a second pass produced %d effect(s); the fab was called %d time(s) in total\n",
 		len(secondPass.Effects), fab.Count())
 
-	settledLease, _ := must2(authority.LoadLease(micro.v, "micro-b", "pcb-fabrication@1"))
+	settledLease, _ := must2(authority.LoadLease(micro.factory, "micro-b", "pcb-fabrication@1"))
 	fmt.Printf("  micro-b's lease: %.2f of %.2f EUR spent — and micro-b holds no model at all\n",
 		settledLease.Spent, settledLease.Amount)
 
@@ -501,8 +501,14 @@ func run() error {
 
 // demoCell is a cell plus the handles the demo needs to poke at it.
 type demoCell struct {
-	cell        *loop.Cell
-	v           *varvigcli.Fake
+	cell *loop.Cell
+	v    *varvigcli.Fake
+	// The demo is a single-project factory, so one replica serves both roles.
+	// The handles are still two, because the call sites still say which role
+	// they are in — which is what keeps the demo an illustration of the real
+	// shape rather than of the shortcut.
+	factory     varvigcli.FactoryRepo
+	project     varvigcli.ProjectRepo
 	sw          *promote.Switch
 	ledger      *budget.Ledger
 	switchPath  string
@@ -529,7 +535,9 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 	sw, err := promote.NewSwitch(switchPath)
 	must(err)
 
-	d := &demoCell{v: v, sw: sw, ledger: ledger, switchPath: switchPath,
+	factory, project := varvigcli.Collapsed(v)
+	d := &demoCell{v: v, factory: factory, project: project,
+		sw: sw, ledger: ledger, switchPath: switchPath,
 		fingerprint: "SHA256:" + id, budget: b, work: work}
 
 	var runtime inference.Runtime = inference.None{}
@@ -544,13 +552,18 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 			CellID: id, Inference: inf,
 			Build: []string{"go"}, Test: []string{"unit"}, Roles: roles,
 		},
-		V:         v,
+		Factory:   factory,
+		Project:   project,
 		Inference: runtime,
 		Sandbox:   &sandbox.Fake{},
 		Artifacts: &artifact.LocalCAS{Root: filepath.Join(work, id, "artifacts")},
 		Ledger:    ledger,
 		Upstream:  "upstream",
-		Branch:    branch,
+		// The demo's one replica serves both roles, so both peers are the same
+		// peer — stated explicitly, because there is no fallback that would
+		// guess it (see profile.Config.FactoryUpstream).
+		FactoryUpstream: "upstream",
+		Branch:          branch,
 		Checks: []loop.Check{
 			{Name: "build", Command: []string{"true"}, Kind: cell.RoleBuild},
 			{Name: "unit", Command: []string{"true"}, Kind: cell.RoleVerify},
@@ -564,7 +577,7 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 		Now: func() time.Time { return clock },
 	}
 	d.cell.Promoter = &promote.Promoter{
-		V: v, Switch: sw, Gate: gate.Module{V: v},
+		Project: project, Switch: sw, Gate: gate.Module{Project: project},
 		Agreement:   agreement.NewGate(0, 0),
 		Reverify:    d.cell,
 		CellID:      id,

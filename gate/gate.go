@@ -159,7 +159,9 @@ func (r Result) Reason() string {
 
 // Module runs a promotion-policy module.
 type Module struct {
-	V varvigcli.Varvig
+	// Project is the project replica: the promotion gate is a ref-update hook on
+	// this codebase's branch, so the hook it sets and runs is that repository's.
+	Project varvigcli.ProjectRepo
 	// EventName defaults to Event.
 	EventName string
 }
@@ -175,7 +177,7 @@ func (m Module) event() string {
 // The id is what makes the rule auditable: an attestation or a log line naming
 // it says exactly which policy was in force.
 func (m Module) Bind(modulePath string) (string, error) {
-	return m.V.HookSet(m.event(), modulePath)
+	return m.Project.HookSet(m.event(), modulePath)
 }
 
 // Evaluate runs the gate over an input.
@@ -188,7 +190,7 @@ func (m Module) Evaluate(ctx context.Context, in Input) (Result, error) {
 	if err != nil {
 		return Result{Verdict: Defer}, err
 	}
-	results, err := m.V.HookRun(ctx, m.event(), payload)
+	results, err := m.Project.HookRun(ctx, m.event(), payload)
 	if err != nil {
 		// A module that could not be run has not approved anything. The error is
 		// returned *and* the verdict is Defer, so a caller that logs the error

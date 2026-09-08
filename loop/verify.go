@@ -96,7 +96,7 @@ func verdictWord(ev cell.Evidence) string {
 
 // PeerAttempts reads every attempt authored by another cell.
 func (c *Cell) PeerAttempts() ([]PeerAttempt, error) {
-	refs, err := c.V.Refs()
+	refs, err := c.Project.Refs()
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (c *Cell) PeerAttempts() ([]PeerAttempt, error) {
 		if err != nil || cellID == c.Capabilities.CellID {
 			continue
 		}
-		payload, err := c.V.ReadBlob(r.Hash)
+		payload, err := c.Project.ReadBlob(r.Hash)
 		if err != nil {
 			continue
 		}
@@ -124,7 +124,7 @@ func (c *Cell) PeerAttempts() ([]PeerAttempt, error) {
 // change. Re-verifying every pass would burn the verification budget on answers
 // the federation already has.
 func (c *Cell) haveEvidenceFor(change string) (bool, error) {
-	notes, err := c.V.Notes(change, cell.NoteEvidence)
+	notes, err := c.Project.Notes(change, cell.NoteEvidence)
 	if err != nil {
 		return false, err
 	}
@@ -143,11 +143,11 @@ func (c *Cell) haveEvidenceFor(change string) (bool, error) {
 // verifyAttempt checks out an attempt and runs the checks against it, writing
 // evidence and the environment it ran in.
 func (c *Cell) verifyAttempt(ctx context.Context, att cell.Attempt) (cell.Evidence, error) {
-	scope, err := c.V.Scope(att.Task)
+	scope, err := c.Project.Scope(att.Task)
 	if err != nil {
 		return cell.Evidence{}, err
 	}
-	task, err := c.V.TaskStart(varvigcli.TaskRequest{
+	task, err := c.Project.TaskStart(varvigcli.TaskRequest{
 		Scope: taskScope(scope),
 		TTL:   c.TaskTTL,
 		// Base is the attempt's own change: verification runs against the state
@@ -160,7 +160,7 @@ func (c *Cell) verifyAttempt(ctx context.Context, att cell.Attempt) (cell.Eviden
 		return cell.Evidence{}, fmt.Errorf("task start: %w", err)
 	}
 	defer func() {
-		if err := c.V.TaskStop(task.ID); err != nil {
+		if err := c.Project.TaskStop(task.ID); err != nil {
 			c.logf("could not revoke task %s: %v", task.ID, err)
 		}
 	}()
@@ -258,7 +258,7 @@ func (c *Cell) promotionRequest(t claim.Ticket, att cell.Attempt) (promote.Reque
 		req.Ref = "refs/heads/main"
 	}
 
-	evNotes, err := c.V.Notes(att.Change, cell.NoteEvidence)
+	evNotes, err := c.Project.Notes(att.Change, cell.NoteEvidence)
 	if err != nil {
 		return req, err
 	}
@@ -273,7 +273,7 @@ func (c *Cell) promotionRequest(t claim.Ticket, att cell.Attempt) (promote.Reque
 		req.Evidence = append(req.Evidence, ev)
 	}
 
-	envNotes, err := c.V.Notes(att.Change, cell.NoteEnvironment)
+	envNotes, err := c.Project.Notes(att.Change, cell.NoteEnvironment)
 	if err != nil {
 		return req, err
 	}
@@ -316,7 +316,7 @@ func (c *Cell) baselineFor(scope string) (cell.Environment, bool) {
 // be able to — the independence requirement is about who produced the *evidence*,
 // not about who promotes.
 func (c *Cell) allAttempts() (map[string][]cell.Attempt, error) {
-	refs, err := c.V.Refs()
+	refs, err := c.Project.Refs()
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +325,7 @@ func (c *Cell) allAttempts() (map[string][]cell.Attempt, error) {
 		if _, _, _, err := cell.ParseAttemptRef(r.Name); err != nil {
 			continue
 		}
-		payload, err := c.V.ReadBlob(r.Hash)
+		payload, err := c.Project.ReadBlob(r.Hash)
 		if err != nil {
 			continue
 		}
@@ -378,7 +378,7 @@ func (c *Cell) releasePins(n int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	refs, err := c.V.Refs()
+	refs, err := c.Project.Refs()
 	if err != nil {
 		return 0, err
 	}
@@ -405,7 +405,7 @@ func (c *Cell) releasePins(n int) (int, error) {
 		if released >= n {
 			break
 		}
-		if err := c.V.DeleteRef(p.ref, p.hash); err != nil {
+		if err := c.Project.DeleteRef(p.ref, p.hash); err != nil {
 			if errors.Is(err, varvigcli.ErrNoRef) {
 				continue
 			}

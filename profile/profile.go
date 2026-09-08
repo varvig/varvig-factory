@@ -184,12 +184,31 @@ type Config struct {
 	Profile string `json:"profile,omitempty"`
 
 	CellID string `json:"cell_id"`
-	// Repo is the varvig repository this cell works in.
+	// Repo is the project repository this cell works in: the codebase, its
+	// tickets, attempts, evidence and reservations.
 	Repo string `json:"repo,omitempty"`
+	// FactoryRepo is the factory-coordination repository: membership, cell
+	// capabilities, interface schemas, envelopes and leases.
+	//
+	// Empty means this cell's project repository serves both roles — the
+	// single-project factory, where there is nothing to fragment. Set it as soon
+	// as there is a second project, because that is the point at which every
+	// project growing its own copy of what the cell may spend stops being
+	// harmless.
+	FactoryRepo string `json:"factory_repo,omitempty"`
 	// VarvigBin overrides the `varvig` binary.
 	VarvigBin string `json:"varvig_bin,omitempty"`
 	Upstream  string `json:"upstream,omitempty"`
-	Branch    string `json:"branch,omitempty"`
+	// FactoryUpstream is the peer the coordination replica syncs with.
+	//
+	// There is deliberately no fallback to Upstream when this is empty. A cell
+	// with two real repositories and only Upstream set would fetch its
+	// authority from its project peer, which is the wrong peer for the question
+	// "what may I spend" — and a default that is right for one deployment shape
+	// and silently wrong for another is worse than no default. A collapsed
+	// deployment sets both fields to the same address and says so.
+	FactoryUpstream string `json:"factory_upstream,omitempty"`
+	Branch          string `json:"branch,omitempty"`
 
 	Roles []cell.Role `json:"roles"`
 	Build []string    `json:"build,omitempty"`
@@ -526,8 +545,14 @@ func (c Config) Validate() error {
 
 // Built is a wired cell plus the pieces a CLI needs to address separately.
 type Built struct {
-	Cell     *loop.Cell
-	Varvig   varvigcli.Varvig
+	Cell *loop.Cell
+	// Varvig is the project replica's client, kept for callers that only need a
+	// repository to read from and do not care which role it is playing.
+	Varvig varvigcli.Varvig
+	// Factory and Project are the two replicas, so a caller asking about spend
+	// asks the repository that authoritatively answers it.
+	Factory  varvigcli.FactoryRepo
+	Project  varvigcli.ProjectRepo
 	Switch   *promote.Switch
 	Ledger   *budget.Ledger
 	Gate     gate.Module
@@ -548,9 +573,28 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 	if err := c.Validate(); err != nil {
 		return Built{}, err
 	}
-	if v == nil {
-		v = varvigcli.Exec{Bin: c.VarvigBin, Dir: c.repo()}
+	// The two replicas.
+	//
+	// A caller that supplied its own client — every test, and the in-process
+	// demo — gets the collapsed configuration, because one client is one
+	// repository however many roles it plays. Combining that with a configured
+	// factory_repo is refused rather than resolved: building a disk-backed
+	// factory client alongside a supplied in-memory one would send authority
+	// reads somewhere the caller did not ask for and cannot see.
+	var factory varvigcli.FactoryRepo
+	var project varvigcli.ProjectRepo
+	switch {
+	case v != nil && c.FactoryRepo != "":
+		return Built{}, fmt.Errorf("profile: a varvig client was supplied and factory_repo is set to %q; these ask for different factory replicas and only one can be right", c.FactoryRepo)
+	case v != nil:
+		factory, project = varvigcli.Collapsed(v)
+	case c.FactoryRepo != "":
+		project = varvigcli.ProjectRepo{Varvig: varvigcli.Exec{Bin: c.VarvigBin, Dir: c.repo()}}
+		factory = varvigcli.FactoryRepo{Varvig: varvigcli.Exec{Bin: c.VarvigBin, Dir: c.FactoryRepo}}
+	default:
+		factory, project = varvigcli.Collapsed(varvigcli.Exec{Bin: c.VarvigBin, Dir: c.repo()})
 	}
+	v = project.Varvig
 
 	ledger, err := budget.NewLedger(c.Budget, c.statePath("ledger.json"), time.Now())
 	if err != nil {
@@ -578,15 +622,17 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		return Built{}, err
 	}
 
-	g := gate.Module{V: v}
+	g := gate.Module{Project: project}
 	cl := &loop.Cell{
 		Capabilities:       c.Capabilities(),
-		V:                  v,
+		Factory:            factory,
+		Project:            project,
 		Inference:          runtime,
 		Sandbox:            box,
 		Artifacts:          store,
 		Ledger:             ledger,
 		Upstream:           c.Upstream,
+		FactoryUpstream:    c.FactoryUpstream,
 		Branch:             c.Branch,
 		Checks:             c.checks(),
 		ClaimTTL:           c.ClaimTTL.D(30 * time.Minute),
@@ -603,7 +649,7 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		EffectTTL:          int64(c.Effects.TTL.D(0) / time.Second),
 	}
 	cl.Promoter = &promote.Promoter{
-		V:           v,
+		Project:     project,
 		Switch:      sw,
 		Gate:        g,
 		Agreement:   agreement.NewGate(c.Promotion.Threshold, c.Promotion.MinObservations),
@@ -615,6 +661,8 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 	return Built{
 		Cell:     cl,
 		Varvig:   v,
+		Factory:  factory,
+		Project:  project,
 		Switch:   sw,
 		Ledger:   ledger,
 		Gate:     g,

@@ -1,7 +1,7 @@
 # The Cell Contract
 
-*Normative. Version 2* — adds authority (§8.1), effectful capabilities (§8.2),
-and the implementation status in §11. Section references in the form §N.N refer
+*Normative. Version 3* — adds the repository split (§2.1), authority (§8.1),
+effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
 This is the interoperability surface of a Factory cell — the part that is
@@ -111,6 +111,59 @@ Two rules about these names:
   the thing that was actually measured.
 
 ---
+
+### 2.1 Two repositories, and which state lives where
+
+A factory holds **one coordination repository** and **N project
+repositories**. A cell holds a full replica of the coordination repo plus a
+replica of each project it works on — not a private repo of its own, and not a
+shared worker against a single repo.
+
+| Repository | Scope | Holds |
+|---|---|---|
+| **Coordination** | The factory | Membership and `allowed_keys`; cell capability objects; interface schemas; overseer envelopes; per-cell budget leases |
+| **Project** | One codebase | Tickets and intents; claims, attempts, evidence, environment descriptors; `artifact-ref` objects; effectful reservations |
+
+A cell replicates exactly one coordination repo, and whichever project repos it
+works on.
+
+**Why split.** Envelopes and leases answer "what may this cell spend", and that
+question has exactly one authoritative answer per factory. Put them in the
+project repos and every project grows its own plausible copy; the sum exceeds
+the envelope and nothing in the system is in a position to notice. One factory
+repo, N project repos, one place to look.
+
+**Which `allowed_keys`.** Both repositories have one, and they are not the same
+list. The coordination repo's says who is a cell in this factory. Each project
+repo's says who may promote in that codebase. A cell can be a member in good
+standing and still not be trusted to move a particular branch.
+
+**Cross-repo binding.** A reservation in a project repo references its lease in
+the coordination repo by hash. A cell must hold both replicas well enough to
+resolve that reference before acting. For the lease, "well enough" means
+*holding it at all* — leases are exclusive, so a stale one is safe (§6.6), and
+requiring freshness here would take back §4.3b's guarantee that effectful action
+inside a lease needs no connectivity.
+
+**Two writes, one order.** Because the reservation and the lease live in
+different repositories, every settlement is two writes with no shared
+transaction — not by oversight but in principle. The lease is written first,
+always. §8.2 states the rule and what each failure window leaves behind.
+
+**Rendezvous.** Whichever peer a cell dials to sync, chosen for reachability —
+not a role, not a coordinator, not an "upstream" in any privileged sense (§3.0).
+Both repository kinds sync through the same mechanism. Reachability of the two
+is tracked separately, because it answers two different questions: the project
+peer decides whether the cell is looking at current *work* (the offline mode of
+§5.2), and the coordination peer decides whether its *trust state* is current
+(the promotion gate of §4.3b). A cell cut off from its project peer may still
+promote what it already holds; a cell cut off from the coordination peer may
+not, because it cannot know who is still allowed to sign.
+
+**The single-project case.** One repository may serve both roles, and for a
+factory with one codebase there is nothing to fragment. The two roles remain
+two: a call site that says which repository it means keeps saying so if the
+factory later grows a second project.
 
 ## 3. Capabilities
 
@@ -430,6 +483,7 @@ between them is the whole design:
 |---|---|---|
 | What it is | A **shared ceiling** across every cell under one overseer | An **exclusive allocation** to one cell |
 | Ref | `refs/factory/envelopes/<overseer-id>` | `refs/factory/leases/<cell-id>/<capability>` |
+| Which repository | Coordination (§2.1) | Coordination (§2.1) |
 | Enforceable from a stale view? | No — another cell may have spent it | Yes — nobody else can spend it |
 | Spendable offline | No | Yes, indefinitely |
 
@@ -622,6 +676,30 @@ hopes:
 | success | the effect happened | hold becomes spend, at the actual price | `done`, with the far end's reference |
 | a definite rejection | **no** effect occurred | hold released | `failed`; the key stays claimed |
 | anything else | **unknown** | hold stands | `pending`; escalates |
+
+#### The lease is written first, always
+
+The Lease and Reservation columns above are two writes to **two repositories**
+(§2.1), so no row is atomic and none can be made so. The order is fixed: the
+lease write lands before the reservation record moves, whether it takes
+headroom, converts it to spend, or gives it back. What that buys is a specific
+set of survivable failures:
+
+| Second write never lands | State left behind | Recovery |
+|---|---|---|
+| after a hold is taken | headroom held for a key nobody claimed | the expiry returns it (§9.14) |
+| after spend is recorded | the lease over-reports what this cell spent | an overseer reading the lease corrects it |
+| after a hold is released | a record still reading open against a lease that no longer holds for it | a retry hits the double-release guard and errors loudly; a principal resolves it |
+
+The state never reachable is a reservation saying an irreversible action is
+settled against a lease with no record of paying for it. That is the one failure
+here nobody can undo, and the ordering exists to buy exactly it.
+
+Reversing the order for the release rows would trade a visibly stuck reservation
+for a narrow double-spend window — a released hold plus a record still open
+invites a principal to resolve it as *happened*, spending headroom that was
+already given back. The guard makes that loud rather than silent, and the fixed
+order keeps it out of reach.
 
 The third row is the one implementations get wrong. A timeout, a dropped
 connection and a 500 are all consistent with the order having been placed, so
@@ -823,6 +901,14 @@ rationale.
     stops and says so; a higher principal decides whether to raise the lease.
 13. **No clearing a pending reservation to get unstuck** (§8.2). Not by retrying,
     not by deleting it, and not by the cell resolving its own unknown state.
+14. **No lease outside the coordination repository** (§2.1). A copy in a project
+    repo is not a cache, it is a second authority: every project would carry its
+    own plausible answer to what the cell may spend, and the sum would exceed
+    the envelope with nothing able to notice.
+15. **No reservation settled before its lease** (§8.2). The two writes are to two
+    repositories and cannot be atomic; a record saying an irreversible action
+    was paid for against a lease with no record of paying is the one state here
+    that nobody can undo.
 
 ---
 
@@ -837,12 +923,14 @@ like one that has decided against it.
 describe *capacity*; a factory is one or more cooperating cells with no
 hierarchy. The terminology is corrected throughout this document and the
 implementation has no branch on the class name — but one behavioural gap
-remains: **there is no designated upstream peer** in the design, and any member
-may act as a rendezvous, several at once. The loop still takes a single
-`upstream` address. That is enough for a cell to sync and it is not a
-coordinator — nothing reads from it that a peer could not serve — but it is not
-yet the "any member, several at once" the design asks for, and a factory should
-keep working when any particular member is unreachable.
+remains: **there is no designated rendezvous peer** in the design, and any
+member may serve as one, several at once. The loop now takes one address *per
+repository kind* — a project peer and a coordination peer (§2.1) — which is the
+shape the split needs, but each is still a single address rather than a set. It
+is enough for a cell to sync and neither is a coordinator: nothing is read from
+either that a peer could not serve. What is missing is the "any member, several
+at once" the design asks for, so a factory still stops syncing a repository when
+that repository's one configured peer is unreachable.
 
 **Interfaces are not yet varvig objects.** A capability reference already binds
 to the interface *hash* rather than the alias (§8.2), which is the part that

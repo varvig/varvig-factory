@@ -9,9 +9,12 @@ import (
 	"github.com/varvig/varvig-factory/varvigcli"
 )
 
-func fake(t *testing.T) *varvigcli.Fake {
+// fake returns the factory replica: every function in store.go writes
+// coordination-repo state, so a test that reached it through a bare client
+// would be testing a call the compiler no longer allows.
+func fake(t *testing.T) varvigcli.FactoryRepo {
 	t.Helper()
-	return varvigcli.NewFake("test")
+	return varvigcli.FactoryRepo{Varvig: varvigcli.NewFake("test")}
 }
 
 func TestEnvelopeAndLeaseRoundTrip(t *testing.T) {

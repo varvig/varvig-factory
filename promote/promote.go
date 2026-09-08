@@ -162,7 +162,15 @@ func (o Outcome) Summary() string {
 
 // Promoter evaluates and, when every condition is met, performs promotion.
 type Promoter struct {
-	V         varvigcli.Varvig
+	// Project is the project replica. Everything promotion touches lives there:
+	// the branch being moved, its tickets and proposals, and the .varvig.d
+	// trust store naming who may sign a ref update in this codebase.
+	//
+	// That trust store is not the factory's membership list and does not
+	// replace it. The coordination repo says who is a cell in this factory; each
+	// project repo says who may promote in that project. A cell can be a member
+	// in good standing and still not be trusted to move this branch.
+	Project   varvigcli.ProjectRepo
 	Switch    *Switch
 	Gate      gate.Module
 	Agreement agreement.Gate
@@ -254,7 +262,7 @@ func (p *Promoter) Promote(ctx context.Context, req Request) (Outcome, error) {
 	}
 
 	// Condition 5: the agreement metric for this scope.
-	rate, err := agreement.RateFor(p.V, req.Scope)
+	rate, err := agreement.RateFor(p.Project, req.Scope)
 	if err != nil {
 		return out, err
 	}
@@ -332,7 +340,7 @@ func (p *Promoter) Promote(ctx context.Context, req Request) (Outcome, error) {
 	// promotion checkpoint on top — the veto gate and the repository's policy
 	// module (TICKETS.md §4). Factory's gate is an additional constraint, never
 	// a replacement for varvig's, so a veto still stops this.
-	change, err := p.V.SpecPromote(req.Ticket, req.Ref)
+	change, err := p.Project.SpecPromote(req.Ticket, req.Ref)
 	if err != nil {
 		return out, fmt.Errorf("promote: varvig refused the promotion: %w", err)
 	}
@@ -403,7 +411,7 @@ func (p *Promoter) checkTrust(scope string) error {
 	if p.Fingerprint == "" {
 		return errors.New("this cell's key fingerprint is not configured, so no promote grant can be verified")
 	}
-	entries, err := p.V.TrustList()
+	entries, err := p.Project.TrustList()
 	if err != nil {
 		return fmt.Errorf("could not read the trust store: %v", err)
 	}
@@ -436,7 +444,7 @@ func (p *Promoter) gateInput(req Request, mode Mode, rate agreement.Rate, indepe
 	if env, ok := req.Environments[req.Attempt.Environment]; ok {
 		in.AttemptEnvironment = &env
 	}
-	if status, err := p.V.TicketStatus(req.Ticket); err == nil {
+	if status, err := p.Project.TicketStatus(req.Ticket); err == nil {
 		in.TicketStatus = status
 	}
 	return in
@@ -452,7 +460,7 @@ func (p *Promoter) gateInput(req Request, mode Mode, rate agreement.Rate, indepe
 // caller-supplied "top" would let the measured thing be whatever the caller
 // believed.
 func (p *Promoter) ObservePromotion(req Request) (agreement.Observation, error) {
-	props, err := p.V.Proposals(req.Ticket)
+	props, err := p.Project.Proposals(req.Ticket)
 	if err != nil {
 		return agreement.Observation{}, err
 	}
@@ -464,12 +472,12 @@ func (p *Promoter) ObservePromotion(req Request) (agreement.Observation, error) 
 	if ref == "" {
 		return agreement.Observation{}, errors.New("promote: observing a promotion needs the ref that was promoted onto")
 	}
-	promoted, err := p.V.ResolveRef(ref)
+	promoted, err := p.Project.ResolveRef(ref)
 	if err != nil {
 		return agreement.Observation{}, err
 	}
 	obs := agreement.Observe(req.Scope, req.Ticket, top, promoted, p.now())
-	if err := agreement.Record(p.V, req.TicketObject, obs); err != nil {
+	if err := agreement.Record(p.Project, req.TicketObject, obs); err != nil {
 		return obs, err
 	}
 	p.logf("agreement observed for %s: top=%s promoted=%s agreed=%t",

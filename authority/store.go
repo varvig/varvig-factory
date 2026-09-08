@@ -15,12 +15,21 @@ import (
 // CAS-updated like every other ref in the system. Nothing here needs a verb
 // varvig does not already have, which is the point — a spend model that
 // required core changes would be a spend model nobody could deploy.
+//
+// # Everything here is the factory-coordination replica, and nothing else
+//
+// Envelopes and leases answer "what may this cell spend", and that question has
+// exactly one authoritative answer per factory. Writing them into a project
+// repository would give every project its own plausible copy, and the sum of
+// those copies would exceed the envelope with nothing able to notice — so every
+// function in this file takes a FactoryRepo, and handing it a project replica is
+// a compile error rather than a discovery made while reconciling a bill.
 
 // PublishEnvelope writes an envelope object and points the overseer's ref at it.
 //
 // oldHash is the value the caller read, so a concurrent change is a refused swap
 // rather than a silent overwrite. Pass "" to assert the ref does not yet exist.
-func PublishEnvelope(v varvigcli.Varvig, e Envelope, oldHash string) (string, error) {
+func PublishEnvelope(f varvigcli.FactoryRepo, e Envelope, oldHash string) (string, error) {
 	if err := e.Validate(); err != nil {
 		return "", err
 	}
@@ -28,7 +37,7 @@ func PublishEnvelope(v varvigcli.Varvig, e Envelope, oldHash string) (string, er
 	if err != nil {
 		return "", err
 	}
-	return publish(v, name, e, oldHash)
+	return publish(f, name, e, oldHash)
 }
 
 // LoadEnvelope reads an overseer's envelope, returning it with the object hash it
@@ -37,13 +46,13 @@ func PublishEnvelope(v varvigcli.Varvig, e Envelope, oldHash string) (string, er
 // A missing envelope is varvigcli.ErrNoRef and not an empty Envelope: no
 // envelope means no authority to spend, and an empty value would read as
 // "validated, with no ceilings", which §8.1 says is malformed.
-func LoadEnvelope(v varvigcli.Varvig, overseer string) (Envelope, string, error) {
+func LoadEnvelope(f varvigcli.FactoryRepo, overseer string) (Envelope, string, error) {
 	name, err := cell.EnvelopeRef(overseer)
 	if err != nil {
 		return Envelope{}, "", err
 	}
 	var e Envelope
-	hash, err := load(v, name, &e)
+	hash, err := load(f, name, &e)
 	if err != nil {
 		return Envelope{}, "", err
 	}
@@ -56,7 +65,7 @@ func LoadEnvelope(v varvigcli.Varvig, overseer string) (Envelope, string, error)
 // PublishLease writes a lease object and points the cell's lease ref at it. It is
 // how an overseer issues a lease and, with the hash from LoadLease, how a cell
 // settles spend against one.
-func PublishLease(v varvigcli.Varvig, l Lease, oldHash string) (string, error) {
+func PublishLease(f varvigcli.FactoryRepo, l Lease, oldHash string) (string, error) {
 	if err := l.Validate(); err != nil {
 		return "", err
 	}
@@ -64,19 +73,19 @@ func PublishLease(v varvigcli.Varvig, l Lease, oldHash string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return publish(v, name, l, oldHash)
+	return publish(f, name, l, oldHash)
 }
 
 // LoadLease reads one cell's lease for one capability, with the hash it was read
 // at. A cell with no lease for a capability gets varvigcli.ErrNoRef, which
 // §8.2 rule 4 turns into a refusal rather than a fallback.
-func LoadLease(v varvigcli.Varvig, cellID, capability string) (Lease, string, error) {
+func LoadLease(f varvigcli.FactoryRepo, cellID, capability string) (Lease, string, error) {
 	name, err := cell.LeaseRef(cellID, capability)
 	if err != nil {
 		return Lease{}, "", err
 	}
 	var l Lease
-	hash, err := load(v, name, &l)
+	hash, err := load(f, name, &l)
 	if err != nil {
 		return Lease{}, "", err
 	}
@@ -95,8 +104,8 @@ func LoadLease(v varvigcli.Varvig, cellID, capability string) (Lease, string, er
 //
 // A malformed lease is reported rather than skipped. Silently dropping one would
 // understate exposure, which is the wrong direction to be wrong in.
-func Leases(v varvigcli.Varvig, cellID string) ([]Lease, error) {
-	refs, err := v.Refs()
+func Leases(f varvigcli.FactoryRepo, cellID string) ([]Lease, error) {
+	refs, err := f.Refs()
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +123,7 @@ func Leases(v varvigcli.Varvig, cellID string) ([]Lease, error) {
 		if !strings.HasPrefix(r.Name, prefix) {
 			continue
 		}
-		body, err := v.ReadBlob(r.Hash)
+		body, err := f.ReadBlob(r.Hash)
 		if err != nil {
 			bad = append(bad, fmt.Sprintf("%s: %v", r.Name, err))
 			continue
@@ -156,7 +165,7 @@ func Leases(v varvigcli.Varvig, cellID string) ([]Lease, error) {
 // (§8.1), because the holder may have placed an order it has not yet reported,
 // and reclaiming there is how a double-spend happens. `reclaim_after` passing
 // makes the lease *reportable*, not collectable.
-func Reclaim(v varvigcli.Varvig, l Lease, oldHash string, now func() int64) error {
+func Reclaim(f varvigcli.FactoryRepo, l Lease, oldHash string, now func() int64) error {
 	if l.Spent > 0 || l.Ordered > 0 {
 		return fmt.Errorf("authority: the lease %s has recorded spend; it is reported to the overseer, not reclaimed, because the cell may hold an order it has not yet reported", l)
 	}
@@ -167,19 +176,19 @@ func Reclaim(v varvigcli.Varvig, l Lease, oldHash string, now func() int64) erro
 	if err != nil {
 		return err
 	}
-	return v.DeleteRef(name, oldHash)
+	return f.DeleteRef(name, oldHash)
 }
 
-func publish(v varvigcli.Varvig, name string, payload any, oldHash string) (string, error) {
+func publish(f varvigcli.FactoryRepo, name string, payload any, oldHash string) (string, error) {
 	body, err := cell.Canonical(payload)
 	if err != nil {
 		return "", err
 	}
-	id, err := v.PutBlob(body)
+	id, err := f.PutBlob(body)
 	if err != nil {
 		return "", err
 	}
-	if err := v.UpdateRef(name, id, oldHash); err != nil {
+	if err := f.UpdateRef(name, id, oldHash); err != nil {
 		if errors.Is(err, varvigcli.ErrCAS) {
 			// Naming the ref matters here: the caller's next step is to re-read
 			// and re-apply, and a bare "compare-and-swap failed" from three
@@ -191,12 +200,12 @@ func publish(v varvigcli.Varvig, name string, payload any, oldHash string) (stri
 	return id, nil
 }
 
-func load(v varvigcli.Varvig, name string, into any) (string, error) {
-	hash, err := v.ResolveRef(name)
+func load(f varvigcli.FactoryRepo, name string, into any) (string, error) {
+	hash, err := f.ResolveRef(name)
 	if err != nil {
 		return "", err
 	}
-	body, err := v.ReadBlob(hash)
+	body, err := f.ReadBlob(hash)
 	if err != nil {
 		return hash, err
 	}

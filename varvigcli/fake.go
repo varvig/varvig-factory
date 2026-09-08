@@ -60,6 +60,18 @@ type Fake struct {
 	// appears on the command line, e.g. "tickets attach-artifact".
 	UnsupportedVerbs map[string]bool
 
+	// RefuseWrites, when non-nil, makes every ref write on this replica fail
+	// with it.
+	//
+	// It exists for one job no collapsed test can do: take *one* of a cell's two
+	// repositories away mid-operation and watch what happens to the other. A
+	// reservation lives in a project repo and the lease it spends from lives in
+	// the coordination repo, so every settlement is two writes to two
+	// repositories that cannot be made atomic — and which state a failure
+	// between them leaves behind is the whole reason the write order is fixed.
+	// Proving that needs a way to fail exactly one side.
+	RefuseWrites error
+
 	// CommitFunc, if set, replaces the default commit. The default hashes the
 	// directory name and the message, which is enough to give each attempt a
 	// distinct change hash without a filesystem.
@@ -294,6 +306,9 @@ func (f *Fake) ResolveRef(name string) (string, error) {
 func (f *Fake) UpdateRef(name, newValue, oldValue string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.RefuseWrites != nil {
+		return f.RefuseWrites
+	}
 	f.note("UpdateRef " + name)
 	cur, exists := f.refs[name]
 	switch {
@@ -312,6 +327,9 @@ func (f *Fake) UpdateRef(name, newValue, oldValue string) error {
 func (f *Fake) DeleteRef(name, oldValue string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.RefuseWrites != nil {
+		return f.RefuseWrites
+	}
 	f.note("DeleteRef " + name)
 	cur, exists := f.refs[name]
 	if !exists {

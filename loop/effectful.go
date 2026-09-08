@@ -83,7 +83,7 @@ func (c *Cell) effectGrants() []claim.EffectGrant {
 		if _, err := c.Executors.For(capability); err != nil {
 			continue
 		}
-		if _, _, err := authority.LoadLease(c.V, c.Capabilities.CellID, cap.ID); err != nil {
+		if _, _, err := authority.LoadLease(c.Factory, c.Capabilities.CellID, cap.ID); err != nil {
 			continue
 		}
 		out = append(out, claim.EffectGrant{Capability: cap.ID, Interface: cap.Interface})
@@ -113,11 +113,11 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 		return refused(res, fmt.Sprintf("the ticket's parameters are not JSON: %v", err)), nil
 	}
 
-	lease, leaseHash, err := authority.LoadLease(c.V, c.Capabilities.CellID, e.Capability)
+	lease, leaseHash, err := authority.LoadLease(c.Factory, c.Capabilities.CellID, e.Capability)
 	if err != nil {
 		return refused(res, fmt.Sprintf("no lease for %s: %v", e.Capability, err)), nil
 	}
-	envelope, _, err := authority.LoadEnvelope(c.V, lease.Overseer)
+	envelope, _, err := authority.LoadEnvelope(c.Factory, lease.Overseer)
 	if err != nil {
 		// No readable envelope means nothing establishes that the overseer still
 		// stands behind this spend. Refusing is the only safe reading.
@@ -154,7 +154,7 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 
 	// Reserve. This claims the key and holds the headroom, and from here the
 	// cell owns the outcome.
-	claimed, err := effect.Reserve(c.V, action, c.Capabilities.CellID, grant, c.now().Unix(), c.EffectTTL)
+	claimed, err := effect.Reserve(c.Factory, c.Project, action, c.Capabilities.CellID, grant, c.now().Unix(), c.EffectTTL)
 	if err != nil {
 		if errors.Is(err, effect.ErrAlreadyReserved) {
 			// Not a failure: somebody already did this, possibly this cell before
@@ -175,7 +175,7 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 	// stands in the repository and whichever connector holds credentials for the
 	// vendor takes it. The cell settles the report on a later pass.
 	if c.Connectors[capability.Interface] {
-		offered, err := effect.Offer(c.V, claimed, c.now().Unix()+c.EffectTTL)
+		offered, err := effect.Offer(c.Project, claimed, c.now().Unix()+c.EffectTTL)
 		if err != nil {
 			return res, fmt.Errorf("%s: offering to a connector: %w", shortID(t.ID), err)
 		}
@@ -186,7 +186,7 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 
 	// In-process: the cell takes its own reservation before acting, so there is
 	// one answer to "who holds this" whichever path produced it.
-	claimed, err = effect.TakeSelf(c.V, claimed, c.now().Unix())
+	claimed, err = effect.TakeSelf(c.Project, claimed, c.now().Unix())
 	if err != nil {
 		return res, fmt.Errorf("%s: taking its own reservation: %w", shortID(t.ID), err)
 	}
@@ -197,7 +197,7 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 
 	switch {
 	case execErr == nil:
-		settled, err := effect.Settle(c.V, claimed, outcome.ExternalRef, outcome.Actual, c.now().Unix())
+		settled, err := effect.Settle(c.Factory, c.Project, claimed, outcome.ExternalRef, outcome.Actual, c.now().Unix())
 		if err != nil {
 			// The effect happened and the record did not. This is the failure
 			// that must not be swallowed: the lease still holds rather than
@@ -217,7 +217,7 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 		// A definite rejection: no effect occurred, so the hold comes back. The
 		// key stays claimed, because whether to try again is a decision for a
 		// higher principal and not a loop behaviour.
-		failed, err := effect.Fail(c.V, claimed, execErr.Error(), c.now().Unix())
+		failed, err := effect.Fail(c.Factory, c.Project, claimed, execErr.Error(), c.now().Unix())
 		if err != nil {
 			return res, fmt.Errorf("%s: recording a rejection: %w", shortID(t.ID), err)
 		}
@@ -248,7 +248,7 @@ func (c *Cell) recordEffect(t claim.Ticket, r effect.Reservation) error {
 	if err != nil {
 		return err
 	}
-	if err := c.V.AddNote(t.Object, cell.NoteEffect, payload); err != nil {
+	if err := c.Project.AddNote(t.Object, cell.NoteEffect, payload); err != nil {
 		return fmt.Errorf("recording the effect on %s: %w", shortID(t.ID), err)
 	}
 	return nil
@@ -281,7 +281,7 @@ func (c *Cell) priorEffect(t claim.Ticket) int {
 	if err != nil {
 		return 0
 	}
-	if _, err := c.V.ResolveRef(name); err != nil {
+	if _, err := c.Project.ResolveRef(name); err != nil {
 		// No reservation, or the repository cannot be read. Either way this is
 		// only an optimisation: answering "no prior action" is safe, because the
 		// create-only claim is what actually prevents the second order.
@@ -301,7 +301,7 @@ func (c *Cell) priorEffect(t claim.Ticket) int {
 // is the lease — Convert refuses an actual beyond the allocation — so a
 // connector reporting a wild figure costs at most an amount the overseer chose.
 func (c *Cell) settleReports() ([]EffectResult, []string) {
-	reported, err := effect.Reported(c.V, c.Capabilities.CellID)
+	reported, err := effect.Reported(c.Project, c.Capabilities.CellID)
 	if err != nil {
 		return nil, []string{"reading connector reports: " + err.Error()}
 	}
@@ -313,19 +313,19 @@ func (c *Cell) settleReports() ([]EffectResult, []string) {
 			Task: r.Task, Capability: r.Capability, Key: r.Key,
 			Amount: r.Amount, Unit: r.Unit,
 		}
-		lease, leaseHash, err := authority.LoadLease(c.V, c.Capabilities.CellID, r.Capability)
+		lease, leaseHash, err := authority.LoadLease(c.Factory, c.Capabilities.CellID, r.Capability)
 		if err != nil {
 			// The report stands and the money is still held; the next pass tries
 			// again. Not settling is safe, and inventing a lease would not be.
 			errs = append(errs, fmt.Sprintf("settling %s: no lease: %v", short(r.Key), err))
 			continue
 		}
-		claim, err := effect.LoadClaim(c.V, c.Capabilities.CellID, r.Key, lease, leaseHash)
+		claim, err := effect.LoadClaim(c.Project, c.Capabilities.CellID, r.Key, lease, leaseHash)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("settling %s: %v", short(r.Key), err))
 			continue
 		}
-		settled, err := effect.SettleReported(c.V, claim, c.now().Unix())
+		settled, err := effect.SettleReported(c.Factory, c.Project, claim, c.now().Unix())
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("settling %s: %v", short(r.Key), err))
 			continue
