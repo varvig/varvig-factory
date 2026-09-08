@@ -83,7 +83,7 @@ attempt**. That is the recommended default and the subject of the next section.
 
 The config it writes is *collapsed*: one repository serving both the
 coordination and the project role, which is correct for a factory with a single
-codebase. Set `factory_repo` and `factory_upstream` when there is a second
+codebase. Set `factory_repo` and `factory_rendezvous` when there is a second
 project — that is the point at which each project growing its own copy of what
 the cell may spend stops being harmless. See "One factory repository, N project
 repositories" below.
@@ -125,10 +125,9 @@ function that turns a config into a running cell — never reads the profile nam
 and [a test](./profile/profile_test.go) reads its syntax tree to prove it. If a
 class ever requires a branch in the code, the abstraction has failed.
 
-> One gap between this and the code: the loop still takes a single `upstream`
-> address to sync against. It is not a coordinator — nothing reads from it that a
-> peer could not serve — but "any member may act as a rendezvous, several at
-> once" is not implemented yet. See [CELL.md §11](./CELL.md).
+The code matches: a cell syncs against a **set** of peers per repository kind,
+contacts every member each pass, and shuffles the order so none is
+systematically first. See "Rendezvous is a set" below.
 
 ### Micro's honest role
 
