@@ -42,9 +42,13 @@ func schedulableTicket() Ticket {
 
 func baseInputs() Inputs {
 	return Inputs{
-		Capabilities:       attemptingCell(),
-		Ticket:             schedulableTicket(),
-		BudgetOK:           true,
+		Capabilities: attemptingCell(),
+		Ticket:       schedulableTicket(),
+		BudgetOK:     true,
+		// An attempting cell whose runtime answered. Set explicitly because the
+		// zero value means "unreachable" — the safe way round for a caller that
+		// forgets, and the reason every vector below has to say it looked.
+		ExecutorReachable:  true,
 		MaxAttemptsPerCell: 3,
 		Now:                now,
 	}
@@ -451,8 +455,9 @@ func TestOrdinaryTicketsAreUnaffected(t *testing.T) {
 			ID: "abc", Spec: "Fix the parser.\nfactory-requires: build=go", Status: "approved",
 			Scope: varvigcli.Scope{Reads: []string{"src"}, Writes: []string{"src"}},
 		},
-		BudgetOK: true,
-		Now:      time.Now(),
+		BudgetOK:          true,
+		ExecutorReachable: true,
+		Now:               time.Now(),
 	}
 	if v := Evaluate(in); !v.Claim {
 		t.Fatalf("an ordinary ticket was refused: %s", v.Reason)

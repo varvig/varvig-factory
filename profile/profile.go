@@ -342,8 +342,24 @@ func Micro(cellID string) Config {
 	}
 }
 
-// Mini is the GPU-local profile: attempting enabled, same binary, config only
-// (§10.4). Every difference from Micro below is a field value.
+// Mini is the accelerated-capacity class, and ships paired with a local model:
+// attempting enabled, same binary, config only (§10.4). Every difference from
+// Micro below is a field value.
+//
+// **The pairing is a convenience, not a property of the class.** Cell class
+// describes build and test capacity and says nothing about inference (§3):
+// inference reaches a cell through an executor that may perfectly well be a
+// hosted API, so it is a capability rather than a hardware fact. What this
+// template does is bundle the two settings an operator most often wants
+// together — more test capacity, and a model to author with.
+//
+// Both cross-combinations are legitimate and supported:
+//
+//	Micro(id).WithInference(hosted)   a commodity host that authors through an API
+//	Mini(id).WithoutInference()       a high-core host that only verifies and builds
+//
+// If a reader ever has to be told which class implies a model, the two axes
+// have been welded together again.
 func Mini(cellID string) Config {
 	c := Micro(cellID)
 	c.Profile = "mini"
@@ -867,4 +883,61 @@ func (c Config) connectorCapabilities() map[string]bool {
 		return nil
 	}
 	return out
+}
+
+// WithInference attaches a model to a cell of any class, and grants it the
+// attempt role.
+//
+// The role comes with the model because the two cannot honestly be separated in
+// the *declaration*: a cell advertising that it attempts while declaring no
+// model is advertising what it cannot do, which cell.Capabilities.Validate
+// refuses. Whether the model answers right now is a different question, decided
+// per pass and handled by declining rather than by refusing to run (§9.17).
+//
+// It does not touch the budget. A hosted model costs money per call and a local
+// one on hardware already paid for costs nothing external, and this function
+// cannot tell which it was handed — so the caller sets the cap, and §7.0 means
+// leaving it unset is unenforced rather than zero.
+func (c Config) WithInference(inf InferenceConfig) Config {
+	c.Inference = inf
+	if !hasRole(c.Roles, cell.RoleAttempt) {
+		c.Roles = append([]cell.Role{cell.RoleAttempt}, c.Roles...)
+	}
+	return c
+}
+
+// WithoutInference makes a cell of any class a policy cell (§3): no model, and
+// no attempt role.
+//
+// The role goes with the model for the same reason it arrives with it. What is
+// left is not a degraded cell — it verifies, builds, executes effectful
+// capabilities and syncs, and the evidence it produces is what licenses another
+// cell's attempt to be promoted autonomously (§6.3.1).
+//
+// The inference budget is cleared too, because a cap on spending that cannot
+// happen is a number that misleads whoever reads the config next.
+func (c Config) WithoutInference() Config {
+	c.Inference = InferenceConfig{Kind: "none", Tier: cell.TierNone}
+	roles := make([]cell.Role, 0, len(c.Roles))
+	for _, r := range c.Roles {
+		if r != cell.RoleAttempt {
+			roles = append(roles, r)
+		}
+	}
+	c.Roles = roles
+	c.Budget.InferenceDaily = 0
+	c.Budget.OfflineInferenceDaily = 0
+	c.Budget.PerCallCost = 0
+	c.Budget.CostPerKTokenIn = 0
+	c.Budget.CostPerKTokenOut = 0
+	return c
+}
+
+func hasRole(roles []cell.Role, want cell.Role) bool {
+	for _, r := range roles {
+		if r == want {
+			return true
+		}
+	}
+	return false
 }

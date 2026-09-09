@@ -190,7 +190,18 @@ func (c Capabilities) Validate() error {
 	// cell that claims tickets it can never attempt — which, because claims are
 	// advisory, other cells would still see and consider.
 	if c.Has(RoleAttempt) && c.Inference.Tier == TierNone {
-		return fmt.Errorf("cell: role %q requires an inference tier other than %q", RoleAttempt, TierNone)
+		// A cell advertising that it attempts while declaring no model is
+		// advertising something it cannot deliver, and a capabilities object is
+		// read by other cells to decide what to expect of this one.
+		//
+		// Note what this does *not* say. It is a check on the declaration's
+		// internal coherence, not on whether a model is reachable right now —
+		// inference arrives through an executor that may be a hosted API, so
+		// reachability is a runtime fact the loop discovers and this object,
+		// which holds static facts only (§2.3), must not try to hold. A cell
+		// whose executor is unreachable keeps this declaration and declines to
+		// attempt; it does not become misconfigured (§9.17).
+		return fmt.Errorf("cell: role %q needs at least one declared model; a cell that advertises attempting with inference tier %q is advertising what it cannot do", RoleAttempt, TierNone)
 	}
 	seen := map[string]bool{}
 	for _, e := range c.Effects {
@@ -333,3 +344,27 @@ func (c Capabilities) Effect(id string) (EffectCapability, bool) {
 	}
 	return EffectCapability{}, false
 }
+
+// PolicyCell reports whether this cell has no model configured at all.
+//
+// This is the distinction §3 says matters more than the capacity class: a
+// policy cell verifies, builds, executes effectful capabilities and syncs, and
+// does not attempt. It is **not a degraded cell.** Its evidence is
+// deterministic, reproducible, and produced by a different cell than the one
+// that authored the attempt — which is exactly the §6.3 condition that licenses
+// autonomous promotion. The cheapest hardware in the factory produces what
+// makes the expensive hardware trustworthy.
+//
+// The one limit worth stating: a policy cell cannot originate work. It needs
+// tickets from somewhere and attempts to verify. Autonomous in its role, not
+// self-directing.
+func (c Capabilities) PolicyCell() bool { return c.Inference.Tier == TierNone }
+
+// InferenceCell reports whether a model is configured for this cell.
+//
+// Orthogonal to the capacity class, and that orthogonality is the point: a
+// Micro cell reaching a hosted API through an executor is an inference cell,
+// and a Mini cell with no model configured is a policy cell. Inference is a
+// *capability*, not a hardware fact (§3), so nothing here may be inferred from
+// how much build and test capacity a cell has.
+func (c Capabilities) InferenceCell() bool { return !c.PolicyCell() }

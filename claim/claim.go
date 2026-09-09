@@ -244,6 +244,21 @@ type Inputs struct {
 	// decision made in one place.
 	BudgetOK     bool
 	BudgetReason string
+	// ExecutorReachable says whether the executor that would author an attempt
+	// answered when the cell last asked, and ExecutorReason carries what it said
+	// when it did not.
+	//
+	// Measured by the caller and passed in, for the same reason the budget is: a
+	// policy that reached out to a model runtime itself would make evaluating a
+	// claim a network operation, and this function is meant to be a
+	// deterministic read over refs.
+	//
+	// **A cell with no attempt role never reaches this check**, so a policy cell
+	// need not set it. The zero value therefore reads as "unreachable", which is
+	// the safe way round: a caller that forgets declines work rather than
+	// attempting it against a runtime nobody confirmed.
+	ExecutorReachable bool
+	ExecutorReason    string
 	// OwnAttempts is how many attempts this cell has already made at this task.
 	OwnAttempts int
 	// MaxAttemptsPerCell caps repeat attempts by this cell at this task. Zero
@@ -314,6 +329,16 @@ const (
 	// SkipNoAuthority: this cell holds no lease, or no executor, for the
 	// capability the ticket needs.
 	SkipNoAuthority SkipReason = "no authority for this effectful capability"
+	// SkipNoExecutor: this cell attempts, and the executor that would do the
+	// authoring is not reachable right now.
+	//
+	// It is a *skip*, which is the whole point of §9.17. A cell whose model has
+	// gone away is not misconfigured and must not refuse to run: it keeps
+	// syncing, keeps verifying other cells' attempts, keeps building, and
+	// declines the work it cannot do — saying which. The alternative, refusing
+	// to start, takes a cell that can still do every deterministic job in the
+	// factory and turns it into one that does nothing at all.
+	SkipNoExecutor SkipReason = "no executor reachable"
 )
 
 // Evaluate applies the policy.
@@ -336,6 +361,16 @@ func Evaluate(in Inputs) Verdict {
 	if !in.Capabilities.Has(cell.RoleAttempt) {
 		return Verdict{Skip: SkipNotAttempting, Reason: fmt.Sprintf(
 			"cell %s holds roles %v; attempting is opt-in", in.Capabilities.CellID, roleNames(in.Capabilities.Roles))}
+	}
+	// The executor comes right after the role, because it is the cheapest and
+	// most decisive thing that can stop an attempt: there is no point weighing
+	// scope, capabilities and budget for work nothing can author.
+	if !in.ExecutorReachable {
+		reason := in.ExecutorReason
+		if reason == "" {
+			reason = "the executor that would author this attempt is not reachable"
+		}
+		return Verdict{Skip: SkipNoExecutor, Reason: reason}
 	}
 	if !in.Ticket.Scope.Declared() {
 		return Verdict{Skip: SkipUnschedulable, Reason: fmt.Sprintf(

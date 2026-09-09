@@ -1146,3 +1146,83 @@ func Test23_NoBudgetFactory(t *testing.T) {
 		t.Fatalf("the unconfigured ledger refuses spend as %q", d.Reason)
 	}
 }
+
+// Test17_ModelFreeLoop is §9.17: a cell with no reachable executor still syncs,
+// verifies, builds and declines cleanly. No stall, no crash.
+//
+// This one used to be unwritable, because the behaviour it describes was
+// impossible. A cell holding the attempt role with an absent or indescribable
+// runtime failed Validate, so Run returned before its first pass and it did
+// nothing at all — not the syncing, not the verifying, not the building. One
+// unavailable capability disabled every available one.
+//
+// The distinction that makes the fix correct: a cell whose model has gone away
+// is not misconfigured, it is a cell with less to offer this pass. So the
+// runtime is probed per pass and the answer reaches claim policy, where it
+// declines attempts and touches nothing else.
+func Test17_ModelFreeLoop(t *testing.T) {
+	ctx := context.Background()
+	o := defaultOpts("mini-a")
+	h := newHarness(t, o)
+
+	// The cell still advertises attempting — it is configured for a model and
+	// the model has stopped answering, which is the case worth testing. A cell
+	// reconfigured as a policy cell is a different and easier scenario.
+	h.Model.Indescribable = true
+
+	// Give it a peer's attempt to verify, so "did nothing" and "did the
+	// deterministic work" are distinguishable in the report.
+	seedPeerAttempt(t, h.V, "micro-b", taskID, "c3feed0000000000000000000000000000000000000000000000000000000003")
+
+	// It starts. That is the first half of the vector: Validate must not treat
+	// an unreachable runtime as a misconfiguration.
+	if err := h.Cell.Validate(ctx); err != nil {
+		t.Fatalf("a cell with an unreachable model refused to start: %v", err)
+	}
+
+	rep, err := h.Cell.Once(ctx)
+	if err != nil {
+		t.Fatalf("the pass failed rather than declining: %v", err)
+	}
+
+	// It declined the attempt, and for the right reason.
+	if len(rep.Attempts) != 0 {
+		t.Fatalf("it attempted with no reachable runtime: %+v", rep.Attempts)
+	}
+	if got := rep.Skipped[claim.SkipNoExecutor]; got != 1 {
+		t.Fatalf("the skip was not attributed to the executor: %+v", rep.Skipped)
+	}
+	if h.Model.Calls != 0 {
+		t.Fatalf("it called the model %d times", h.Model.Calls)
+	}
+
+	// And it says which runtime declined and why, once for the pass. A cell
+	// quietly declining everything is indistinguishable from a cell with
+	// nothing to do.
+	if !strings.Contains(h.logText(), "not attempting this pass") {
+		t.Fatalf("a cell that stopped attempting did not say so:\n%s", h.logText())
+	}
+
+	// The deterministic work still happened. This is the half the old
+	// behaviour destroyed.
+	if len(rep.Verified) != 1 {
+		t.Fatalf("verified %d peer attempts, want 1: %+v", len(rep.Verified), rep)
+	}
+	if rep.Verified[0].Evidence.Environment == "" {
+		t.Fatal("the evidence carries no environment, so no build actually ran")
+	}
+	if rep.Observed == 0 {
+		t.Fatal("it observed no tickets, so the sync and observe steps did not run")
+	}
+
+	// It recovers on its own when the runtime comes back: no restart, and
+	// nothing to reconfigure, because nothing was ever treated as broken.
+	h.Model.Indescribable = false
+	back, err := h.Cell.Once(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(back.Attempts) != 1 {
+		t.Fatalf("it did not resume attempting when the runtime returned: %+v", back)
+	}
+}
