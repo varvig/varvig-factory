@@ -268,9 +268,17 @@ promotion federation-wide. Both paths are tested; see §9.7 below.
 
 ## Budget
 
-A cell declares a spend cap and halts when it is exceeded. Not optional:
-attempts multiply cost, and a disconnected cell claiming speculatively can burn
-budget on work that proves duplicative.
+**Budgets are optional, and absence means unenforced.** A factory where nobody
+configured spending simply works. That is worth stating plainly because this
+code used to do the opposite: an unset cap read as a cap of zero, so a factory
+with no budget configured refused every ticket and reported being out of money.
+Most of what a cell does — builds, tests, verification, sync, local inference on
+hardware already paid for — costs nothing external and should require no
+overseer, no envelope and no lease.
+
+Where a cap *is* set it is enforced strictly: attempts multiply cost, and a
+disconnected cell claiming speculatively can burn budget on work that proves
+duplicative. Making absence permissive does not make presence permissive.
 
 ```json
 {
@@ -449,9 +457,39 @@ happens once in the physical world. Two gates it is *not* subject to:
 - **Not the inference budget.** An order is paid from its lease; coupling the
   two would surface as an order that silently did not happen.
 
-A cell needs **both** a lease and an executor for a capability. Holding either
-alone means it declines the ticket rather than claiming it and discovering the
-problem afterwards.
+A cell needs an executor for a capability, and a lease **only if the capability
+declares a cost model**. Holding neither means it declines the ticket rather
+than claiming it and discovering the problem afterwards.
+
+### Effectful and expensive are different things
+
+`effectful` means **irreversible**, not costly. Turning on a light, moving an
+arm, printing with filament already paid for, posting a message: every one
+irreversible, every one free. Requiring a lease for those made an overseer and a
+budget the price of admission for a factory that spends nothing — and refused
+the whole class of physical work the design exists to reach.
+
+So a capability declaring no cost model needs no lease, and still obeys every
+other rule: one attempt, an idempotency key, authorization by a higher
+principal, escalation instead of retry. Those rules exist because the action
+cannot be undone, which has nothing to do with its price.
+
+Two things keep that from becoming a hole:
+
+- **An undeclared cost is refused as malformed**, never run unmetered. The
+  moment "no cost model" means "no lease needed", omitting the cost model is the
+  cheapest way to spend money unwatched — so the permission and its guard land
+  together.
+- **The envelope bounds quantity and rate**, not only spend, with no currency
+  invented for the purpose: "at most 20 prints a day" needs none. For a free
+  capability those ceilings are the *only* bound, which is why they had to start
+  being enforced. Rate is measured from reservation refs, and an unmeasured
+  history refuses rather than passing — an unmeasured history is not an empty
+  one.
+
+A ticket supplies a capability's identity; the cell's configuration supplies its
+terms. Reading the cost model off the request would let a ticket declare a board
+order free.
 
 The executor is a seam like the model runtime and the build sandbox, and for a
 sharper reason than either: the alternative to a fake is a real board order. Only

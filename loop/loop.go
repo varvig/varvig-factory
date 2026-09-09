@@ -142,6 +142,21 @@ type Cell struct {
 	// that it is not the cell itself lives in effect.Check, so a cell cannot
 	// authorize its own spending by editing its own config (§9.15).
 	EffectAuthorizedBy string
+	// EffectOverseer names the overseer whose envelope bounds this cell's
+	// **free** effectful capabilities — the ones with no cost model and so no
+	// lease (§7.0).
+	//
+	// A priced capability needs no such field: its lease names the overseer
+	// that issued it, which is the envelope that bounds it, and taking the name
+	// from anywhere else would let a cell shop for a friendlier ceiling. A free
+	// capability has no lease, so there is nothing to read the name off, and it
+	// has to be configured or the quantity and rate ceilings of §9.26 have no
+	// envelope to come from.
+	//
+	// Empty means no overseer is configured for free effects, which per §7.0
+	// leaves them unbounded rather than forbidden. That is the deliberate
+	// reading: a factory nobody has set ceilings for still works.
+	EffectOverseer string
 	// EffectTTL is how long a reservation holds lease headroom before the hold
 	// lapses (§9.14). Zero means no expiry, which is only right for a capability
 	// that always answers synchronously.
@@ -233,7 +248,16 @@ func (c *Cell) Validate(ctx context.Context) error {
 		return errors.New("loop: no factory replica configured; a cell's authority to spend lives in the coordination repository, and a cell that cannot read it cannot know what it may do. For a single-project factory, varvigcli.Collapsed serves both roles from one repository")
 	}
 	if c.Ledger == nil {
-		return errors.New("loop: no budget ledger configured; a cell without a declared budget is not permitted (§7)")
+		// §7.0: a factory with no budgets configured must simply work. This used
+		// to refuse, citing §7 — which had it exactly backwards, since absence
+		// of a budget means no enforcement and never a zero one. An unenforced
+		// ledger keeps every call site below unconditional rather than sprinkling
+		// nil checks through the loop.
+		led, err := budget.NewLedger(budget.Budget{}, "", c.now())
+		if err != nil {
+			return fmt.Errorf("loop: could not build an unenforced ledger: %w", err)
+		}
+		c.Ledger = led
 	}
 	if c.ClaimTTL <= 0 {
 		return errors.New("loop: claim ttl must be positive; an unexpiring claim is a lock")

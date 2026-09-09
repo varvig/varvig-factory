@@ -177,7 +177,6 @@ const (
 	ReasonOfflineCap      Reason = "offline inference cap reached"
 	ReasonStorage         Reason = "storage cap reached"
 	ReasonVerifySaturated Reason = "verification slots saturated"
-	ReasonNoInference     Reason = "no inference budget declared"
 )
 
 // Decision is the ledger's answer to "may I spend?".
@@ -276,8 +275,17 @@ func (l *Ledger) CanSpend(now time.Time, offline bool) Decision {
 	defer l.mu.Unlock()
 	l.rollover(now)
 
+	// §7.0: **absence of a cap means no enforcement, never a zero budget.** A
+	// factory where nobody configured spending must simply work — most of what
+	// a cell does costs nothing external, and local inference on hardware
+	// already paid for is in that set. Reading an unset cap as zero would make
+	// a cell refuse to attempt anything until someone filled in a number, which
+	// is broken rather than safe.
+	//
+	// The offline cap below is derived from this one, so it is unenforced too
+	// when nothing is set: a fraction of unlimited is unlimited.
 	if l.budget.InferenceDaily <= 0 {
-		return Decision{Reason: ReasonNoInference}
+		return Decision{OK: true}
 	}
 	if l.spent >= l.budget.InferenceDaily {
 		return Decision{Reason: ReasonInferenceDaily, Spent: l.spent, Cap: l.budget.InferenceDaily}
@@ -453,7 +461,7 @@ func RelieveStoragePressure(b Budget, r Releaser) (StorageRelief, error) {
 // them. Sorted so the output is stable.
 func SortedReasons() []Reason {
 	out := []Reason{
-		ReasonInferenceDaily, ReasonNoInference, ReasonOfflineCap,
+		ReasonInferenceDaily, ReasonOfflineCap,
 		ReasonStorage, ReasonVerifySaturated,
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })

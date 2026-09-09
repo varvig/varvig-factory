@@ -81,12 +81,18 @@ func (r EffectResult) String() string {
 func (c *Cell) effectGrants() []claim.EffectGrant {
 	var out []claim.EffectGrant
 	for _, cap := range c.Capabilities.Effects {
-		capability := effect.Capability{ID: cap.ID, Interface: cap.Interface, Effectful: true}
+		capability := effect.Capability{ID: cap.ID, Interface: cap.Interface, Effectful: true, CostModel: cap.CostModel}
 		if _, err := c.Executors.For(capability); err != nil {
 			continue
 		}
-		if _, _, err := authority.LoadLease(c.Factory, c.Capabilities.CellID, cap.ID); err != nil {
-			continue
+		// A lease is required only for a capability that declares a cost model
+		// (§7.0). Requiring one for a free effect would make an overseer and a
+		// budget the price of turning on a light, and would leave a factory
+		// that spends nothing unable to act at all.
+		if capability.Priced() {
+			if _, _, err := authority.LoadLease(c.Factory, c.Capabilities.CellID, cap.ID); err != nil {
+				continue
+			}
 		}
 		out = append(out, claim.EffectGrant{Capability: cap.ID, Interface: cap.Interface})
 	}
@@ -104,7 +110,19 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 	e := *req.Effect
 	res := EffectResult{Task: t.ID, Capability: e.Capability}
 
-	capability := effect.Capability{ID: e.Capability, Interface: e.Interface, Effectful: true}
+	// The capability's terms come from **this cell's configuration**, and only
+	// its identity from the ticket. A ticket says what it wants done; an
+	// operator says what doing it costs. Reading the cost model off the request
+	// would let a ticket declare a priced capability free and walk past the
+	// lease check entirely.
+	configured, ok := c.Capabilities.Effect(e.Capability)
+	if !ok {
+		return refused(res, fmt.Sprintf("this cell declares no effectful capability %q", e.Capability)), nil
+	}
+	capability := effect.Capability{
+		ID: e.Capability, Interface: e.Interface, Effectful: true,
+		CostModel: configured.CostModel,
+	}
 
 	// The interface must resolve in the registry before anything else happens.
 	//
@@ -129,17 +147,30 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 		return refused(res, fmt.Sprintf("the ticket's parameters are not JSON: %v", err)), nil
 	}
 
-	lease, leaseHash, err := authority.LoadLease(c.Factory, c.Capabilities.CellID, e.Capability)
-	if err != nil {
-		return refused(res, fmt.Sprintf("no lease for %s: %v", e.Capability, err)), nil
+	// A priced capability needs its lease and the envelope that bounds it. A
+	// free one needs neither, and where an overseer is configured its ceilings
+	// still apply — through the envelope named by c.EffectOverseer, since with
+	// no lease there is nothing else to name one.
+	var grant authority.Grant
+	if capability.Priced() {
+		lease, leaseHash, err := authority.LoadLease(c.Factory, c.Capabilities.CellID, e.Capability)
+		if err != nil {
+			return refused(res, fmt.Sprintf("no lease for %s: %v", e.Capability, err)), nil
+		}
+		envelope, _, err := authority.LoadEnvelope(c.Factory, lease.Overseer)
+		if err != nil {
+			// No readable envelope means nothing establishes that the overseer
+			// still stands behind this spend. Refusing is the only safe reading.
+			return refused(res, fmt.Sprintf("cannot read overseer %s's envelope: %v", lease.Overseer, err)), nil
+		}
+		grant = authority.Grant{Envelope: envelope, Lease: &lease, LeaseHash: leaseHash}
+	} else if c.EffectOverseer != "" {
+		envelope, _, err := authority.LoadEnvelope(c.Factory, c.EffectOverseer)
+		if err != nil {
+			return refused(res, fmt.Sprintf("cannot read overseer %s's envelope: %v", c.EffectOverseer, err)), nil
+		}
+		grant = authority.Grant{Envelope: envelope}
 	}
-	envelope, _, err := authority.LoadEnvelope(c.Factory, lease.Overseer)
-	if err != nil {
-		// No readable envelope means nothing establishes that the overseer still
-		// stands behind this spend. Refusing is the only safe reading.
-		return refused(res, fmt.Sprintf("cannot read overseer %s's envelope: %v", lease.Overseer, err)), nil
-	}
-	grant := authority.Grant{Envelope: envelope, Lease: &lease, LeaseHash: leaseHash}
 
 	action := effect.Request{
 		Capability:   capability,
@@ -159,10 +190,24 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 	action.Amount, action.Quantity, action.Unit = quote.Amount, quote.Quantity, quote.Unit
 	res.Amount, res.Unit = quote.Amount, quote.Unit
 
+	// Measure the rate history before deciding, because a rate ceiling is the
+	// one bound that cannot be answered from the request alone — and for a free
+	// capability it is very likely the only bound there is. An unreadable
+	// reservation makes the count untrustworthy rather than low, so the error
+	// refuses instead of passing a short count off as a measurement.
+	hist := authority.History{}
+	if grant.Envelope.Configured() {
+		taken, err := effect.ActionsToday(c.Project, c.Capabilities.CellID, e.Capability, c.now().Unix())
+		if err != nil {
+			return refused(res, fmt.Sprintf("cannot measure today's %s actions, so a rate ceiling cannot be honoured: %v", e.Capability, err)), nil
+		}
+		hist = authority.History{ActionsToday: taken, Measured: true}
+	}
+
 	// Authorize, against the quoted amount and the envelope-bounded lease. Every
 	// unmet rule is reported at once: an operator about to spend money should see
 	// the whole list rather than one round trip per broken rule.
-	decision := effect.Check(action, c.Capabilities.CellID, grant, c.sync, c.now, c.MaxTrustAge)
+	decision := effect.Check(action, c.Capabilities.CellID, grant, c.sync, c.now, c.MaxTrustAge, hist)
 	res.Key = decision.Key
 	if !decision.Allowed {
 		return refused(res, decision.Error()), nil

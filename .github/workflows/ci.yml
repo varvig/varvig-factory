@@ -67,15 +67,19 @@ jobs:
       # are the tests that hold the properties a federation depends on: partition
       # duplicates, offline operation, environment determinism, and the refusals
       # that make autonomy defensible.
-      - name: conformance (spec §9.1-9.9)
-        run: go test -v -run 'Test0[1-9]_' ./conformance/
+      # The pattern matches any Test<digits>_ rather than a hand-written range,
+      # because a range has to be widened every time the spec grows a vector and
+      # a vector nobody runs is worse than one nobody wrote. §9.23 landed with
+      # Test0[1-9] still in place here and would have silently not run.
+      - name: conformance (spec §9.1-9.9, §9.23)
+        run: go test -v -run 'Test[0-9]+[a-d]?_' ./conformance/
 
       # §9.10 onward live with the packages they constrain rather than in
       # conformance/, because they are refusals about spending money and belong
       # next to the code that refuses. Same reason for the separate step: a
       # double-spend guard failing should be legible without opening a log.
-      - name: conformance (spec §9.10-9.16, authority and effects)
-        run: go test -v -run 'Test1[0-9][a-d]?_' ./authority/ ./effect/
+      - name: conformance (spec §9.10-9.16, §9.24-9.26, authority and effects)
+        run: go test -v -run 'Test[0-9]+[a-d]?_' ./authority/ ./effect/
 
       # The guards, likewise separate. A failure here means the code has grown
       # something the design forbids — a second scheduler, a branch on cell class,

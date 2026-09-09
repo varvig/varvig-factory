@@ -537,3 +537,106 @@ func (g Grant) Bounded() (*Lease, error) {
 	}
 	return &bounded, nil
 }
+
+// Configured reports whether an envelope has been set at all.
+//
+// This is the distinction §7.0 turns on: **absence of an envelope means no
+// budget enforcement, never zero budget.** A factory where nobody configured
+// spending must simply work, because most of what a factory does — builds,
+// tests, verification, sync, local inference on hardware already paid for —
+// costs nothing external and should not require an overseer to authorize.
+//
+// The opposite reading is the one worth naming, because it is the tempting one:
+// treating an unset envelope as a zero ceiling would make a factory refuse to
+// act until someone filled in a budget form, which is broken rather than safe.
+//
+// An envelope that *does* exist and simply omits a capability is a different
+// thing entirely, and Lease.Constrain and PermitCeiling both refuse it: silence
+// from a configured overseer is an omission, not a blank cheque.
+func (e Envelope) Configured() bool {
+	return e.Overseer != "" || len(e.Ceilings) > 0 || e.SetAt != 0
+}
+
+// History is what the caller knows about a cell's recent effectful actions
+// against one capability.
+//
+// A rate ceiling needs it and a pure decision function cannot discover it: how
+// many prints happened today is repository state, not an argument of the action
+// being judged. So the caller measures — effect.ActionsToday does it from
+// reservation refs — and passes what it found.
+//
+// **The zero value is "unmeasured", and a rate ceiling refuses on it.** That is
+// deliberate and it is the whole reason Measured exists as a separate field
+// rather than zero standing for "none today": a caller that forgets to look
+// must not get a free pass, because an unmeasured history is not an empty one.
+type History struct {
+	// ActionsToday is how many actions against this capability in the trailing
+	// day could have happened. A day, not a configurable window, because
+	// Ceiling.RatePerDay is already a per-day figure and scaling one to the
+	// other would only introduce arithmetic nobody asked for.
+	ActionsToday int64
+	// Measured says the caller actually looked.
+	Measured bool
+}
+
+// PermitCeiling is §6.7 rule 4: an effectful action is bounded by the overseer's
+// envelope on spend, quantity and rate.
+//
+// It applies to **every** effectful action, free or leased. Rule 4 is not the
+// lease check — that is rule 5, and it is conditional on the capability
+// declaring a cost model. A free effectful capability has no lease to bound it,
+// so this is the only thing standing between "at most 20 prints per day" and
+// the four hundredth print.
+//
+// Rate is the dimension that had no enforcement at all before: a spend cap
+// stops one expensive mistake and a quantity cap stops a units-confusion
+// mistake, but neither stops a loop that is individually within both and runs
+// all night. It is also the only ceiling that means anything for a capability
+// with no price, which is exactly the case §7.0 introduced.
+//
+// With no envelope configured, nothing is bounded (§7.0). With one configured,
+// a capability it does not name is refused rather than treated as unbounded.
+func PermitCeiling(env Envelope, capability, unit string, amount cell.Money, quantity int64, hist History) error {
+	if !env.Configured() {
+		return nil
+	}
+	if err := env.Validate(); err != nil {
+		// A malformed envelope is not an absent one. Reading it as absent would
+		// make the widest possible interpretation the consequence of a typo.
+		return Refusal{Act: ActEffectful, Escalate: true, Reason: err.Error()}
+	}
+	ceiling, ok := env.Ceiling(capability)
+	if !ok {
+		return Refusal{Act: ActEffectful, Escalate: true, Reason: fmt.Sprintf(
+			"the envelope for %s declares no ceiling for %q; an overseer that is configured and does not name a capability has not authorized it",
+			env.Overseer, capability)}
+	}
+	if ceiling.Unit != "" && unit != "" && ceiling.Unit != unit {
+		return Refusal{Act: ActEffectful, Escalate: true, Reason: fmt.Sprintf(
+			"this action is priced in %q but the envelope's ceiling for %s is in %q; comparing them would be arithmetic on unlike units",
+			unit, capability, ceiling.Unit)}
+	}
+	if ceiling.Spend > 0 && amount > ceiling.Spend {
+		return Refusal{Act: ActEffectful, Escalate: true, Reason: fmt.Sprintf(
+			"this action costs %s %s but the envelope's ceiling for %s is %s %s",
+			amount.In(ceiling.Unit), ceiling.Unit, capability, ceiling.Spend.In(ceiling.Unit), ceiling.Unit)}
+	}
+	if ceiling.Quantity > 0 && quantity > ceiling.Quantity {
+		return Refusal{Act: ActEffectful, Escalate: true, Reason: fmt.Sprintf(
+			"this action orders %d units but the envelope's ceiling for %s is %d",
+			quantity, capability, ceiling.Quantity)}
+	}
+	if ceiling.RatePerDay > 0 {
+		if !hist.Measured {
+			return Refusal{Act: ActEffectful, Escalate: true, Reason: fmt.Sprintf(
+				"the envelope caps %s at %d per day and this cell has not measured how many it has already taken; an unmeasured history is not an empty one",
+				capability, ceiling.RatePerDay)}
+		}
+		if hist.ActionsToday >= ceiling.RatePerDay {
+			return Refusal{Act: ActEffectful, Escalate: true, Reason: fmt.Sprintf(
+				"the envelope caps %s at %d per day and this cell has already taken %d today",
+				capability, ceiling.RatePerDay, hist.ActionsToday)}
+		}
+	}
+	return nil
+}

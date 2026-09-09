@@ -39,18 +39,21 @@ import (
 	"github.com/varvig/varvig-factory/cell"
 )
 
-// CostModel says how a capability's price is known.
-type CostModel string
+// CostModel is the cell contract's cost model, aliased here so this package
+// reads naturally without there being two definitions to drift apart. It is
+// declared in cell/ because a capability's cost model is configuration, and
+// where it is declared decides who may declare it (see cell.CostModel).
+type CostModel = cell.CostModel
 
-// The cost models.
+// The cost models, re-exported from the cell contract.
 const (
 	// CostFixed is a price known from the capability contract.
-	CostFixed CostModel = "fixed"
+	CostFixed = cell.CostFixed
 	// CostQuoted means the price is not known until an external service is
 	// asked. Such capabilities **require connectivity by their nature**, not by
 	// policy — so there is no rule here forbidding offline quoted actions, only
 	// the observation that they cannot happen.
-	CostQuoted CostModel = "quoted"
+	CostQuoted = cell.CostQuoted
 )
 
 // Capability is an effectful capability's contract, as a cell reads it.
@@ -81,9 +84,7 @@ func (c Capability) Validate() error {
 	if !cell.IsMultihash(c.Interface) {
 		return fmt.Errorf("effect: capability %q names interface %q, which is not an object hash", c.ID, c.Interface)
 	}
-	switch c.CostModel {
-	case "", CostFixed, CostQuoted:
-	default:
+	if !c.CostModel.Valid() {
 		return fmt.Errorf("effect: capability %q has unknown cost model %q", c.ID, c.CostModel)
 	}
 	return nil
@@ -97,6 +98,18 @@ func (c Capability) Validate() error {
 func (c Capability) Matches(other Capability) bool {
 	return c.Interface != "" && c.Interface == other.Interface
 }
+
+// Priced reports whether this capability declares a cost model, and therefore
+// whether a lease has to back an action against it (§7.0).
+//
+// The two halves of that sentence are the whole of the budget rule: a
+// capability with a cost model needs a lease with headroom, and one without
+// needs nothing. **`effectful` and `costs money` are orthogonal** — turning on
+// a light, moving an arm, printing with filament already paid for, posting a
+// message: every one irreversible, every one free. Requiring a lease for those
+// would make an overseer and a budget the price of admission for a factory that
+// spends nothing.
+func (c Capability) Priced() bool { return c.CostModel.Priced() }
 
 // Request is one proposed effectful action.
 type Request struct {
@@ -193,30 +206,31 @@ func (d Decision) Error() string {
 // executingCell is the cell about to act; grant is the envelope and lease it
 // acts under; sync is what it knows about the currency of trust state.
 //
+// hist is what the caller measured about this cell's recent actions against this
+// capability; a rate ceiling needs it and cannot be derived from the request.
+//
 // The spend rules are evaluated against the **envelope-bounded** lease, not the
 // lease as issued, so an overseer who tightened the envelope has the tighter
 // ceiling honoured here before anything happens (§9.12).
+//
+// Rules 4 and 5 are separate checks and not a redundancy. Rule 4 bounds the
+// action against the overseer's envelope and applies to every effectful action.
+// Rule 5 spends from the cell's exclusive lease and applies **only** to a
+// capability that declares a cost model. A free capability is bounded by the
+// envelope's quantity and rate ceilings alone, which is why those had to start
+// being enforced for §7.0 to be safe rather than merely permissive.
 //
 // The order is cheapest-and-most-decisive first, but every rule is evaluated:
 // unlike the promotion path, where an early exit saves an expensive
 // re-verification, nothing here is expensive and an operator about to spend
 // money should see the full list.
-func Check(req Request, executingCell string, grant authority.Grant, sync authority.Sync, now nowFunc, maxAge authority.MaxAge) Decision {
+func Check(req Request, executingCell string, grant authority.Grant, sync authority.Sync, now nowFunc, maxAge authority.MaxAge, hist authority.History) Decision {
 	var d Decision
-
-	// Rule 4: bounded by the envelope. This resolves before the rest because
-	// every spend rule below is checked against its result — a lease read
-	// without its envelope is a lease nobody has bounded.
-	lease, boundErr := grant.Bounded()
-	if boundErr != nil {
-		d.Escalate = true
-		d.Refusals = append(d.Refusals, boundErr.Error())
-	}
 
 	if err := req.Capability.Validate(); err != nil {
 		d.Refusals = append(d.Refusals, err.Error())
-		// Without a valid capability there is no key to derive and no lease to
-		// match; the rest of the rules would be checking nothing.
+		// Without a valid capability there is no key to derive and no ceiling to
+		// look up; the rest of the rules would be checking nothing.
 		return d
 	}
 	if !req.Capability.Effectful {
@@ -250,23 +264,68 @@ func Check(req Request, executingCell string, grant authority.Grant, sync author
 		d.Refusals = append(d.Refusals, fmt.Sprintf("%v: %s cannot authorize itself", ErrSelfAuthorization, executingCell))
 	}
 
-	// Rule 5: spent from this cell's own lease. Note the asymmetry that §6.6
-	// insists on — the lease check needs no freshness, because an exclusive
-	// allocation was already committed when it was issued, and the envelope
-	// bound above is safe to apply from any view because it only tightens.
-	if boundErr != nil {
-		// Already refused above, and without a bounded lease there is no
-		// headroom to check against.
-	} else if lease != nil && lease.CellID != "" && lease.CellID != executingCell {
+	// The §7.0 guard: **an undeclared cost is a malformed capability, not a free
+	// one.** Without this, "no cost model" would be the cheapest way to run
+	// something unmetered — the guard and the permission arrive together or the
+	// permission is a hole. A negative amount is refused in the same breath: it
+	// is not a discount, it is a sign error, and it would pass every headroom
+	// check by making the arithmetic run backwards.
+	priced := req.Capability.Priced()
+	if req.Amount < 0 {
 		d.Refusals = append(d.Refusals, fmt.Sprintf(
-			"the lease for %s belongs to %s, not to %s; spend comes from the acting cell's own lease",
-			req.Capability.ID, lease.CellID, executingCell))
-	} else if err := authority.PermitSpend(sync, now(), maxAge, lease, req.Amount, req.Quantity); err != nil {
+			"this action reports a negative cost (%s %s) for %s; an amount below zero is a sign error, not a credit",
+			req.Amount.In(req.Unit), req.Unit, req.Capability.ID))
+	} else if req.Amount > 0 && !priced {
+		d.Escalate = true
+		d.Refusals = append(d.Refusals, fmt.Sprintf(
+			"capability %q declares no cost model but this action costs %s %s; an undeclared cost is a malformed capability, not a free one",
+			req.Capability.ID, req.Amount.In(req.Unit), req.Unit))
+	}
+
+	// Rule 4: bounded by the overseer's envelope — spend, quantity and rate.
+	// This applies whether or not a lease is involved, and for a free capability
+	// it is the only bound there is.
+	if err := authority.PermitCeiling(grant.Envelope, req.Capability.ID, req.Unit, req.Amount, req.Quantity, hist); err != nil {
 		var refusal authority.Refusal
 		if errors.As(err, &refusal) && refusal.Escalate {
 			d.Escalate = true
 		}
 		d.Refusals = append(d.Refusals, err.Error())
+	}
+
+	// Rule 5: spend comes from this cell's own lease — **if and only if** the
+	// capability declares a cost model. Note the asymmetry §6.6 insists on: the
+	// lease check needs no freshness, because an exclusive allocation was
+	// already committed when it was issued.
+	//
+	// A free capability holding a lease anyway is not an error and not spent
+	// from: nothing here draws on it, so it simply goes unused. That is the
+	// state a factory passes through when a capability stops being priced.
+	if priced {
+		lease, boundErr := grant.Bounded()
+		switch {
+		case boundErr != nil:
+			// A lease read without its envelope is a lease nobody has bounded.
+			d.Escalate = true
+			d.Refusals = append(d.Refusals, boundErr.Error())
+		case lease != nil && lease.CellID != "" && lease.CellID != executingCell:
+			d.Refusals = append(d.Refusals, fmt.Sprintf(
+				"the lease for %s belongs to %s, not to %s; spend comes from the acting cell's own lease",
+				req.Capability.ID, lease.CellID, executingCell))
+		default:
+			if err := authority.PermitSpend(sync, now(), maxAge, lease, req.Amount, req.Quantity); err != nil {
+				var refusal authority.Refusal
+				if errors.As(err, &refusal) && refusal.Escalate {
+					d.Escalate = true
+				}
+				d.Refusals = append(d.Refusals, err.Error())
+			}
+			if lease != nil && lease.Unit != "" && req.Unit != "" && lease.Unit != req.Unit {
+				d.Refusals = append(d.Refusals, fmt.Sprintf(
+					"this action is priced in %q but the lease for %s is in %q; comparing them would be arithmetic on unlike units",
+					req.Unit, req.Capability.ID, lease.Unit))
+			}
+		}
 	}
 
 	// A quoted capability cannot be priced offline. This is stated as an
@@ -276,12 +335,6 @@ func Check(req Request, executingCell string, grant authority.Grant, sync author
 	if req.Capability.CostModel == CostQuoted && sync.Configured && !sync.Reachable {
 		d.Refusals = append(d.Refusals, fmt.Sprintf(
 			"capability %q is quoted, so its price comes from an external service that is not reachable now; this is a property of the capability, not a policy", req.Capability.ID))
-	}
-
-	if lease != nil && lease.Unit != "" && req.Unit != "" && lease.Unit != req.Unit {
-		d.Refusals = append(d.Refusals, fmt.Sprintf(
-			"this action is priced in %q but the lease for %s is in %q; comparing them would be arithmetic on unlike units",
-			req.Unit, req.Capability.ID, lease.Unit))
 	}
 
 	d.Allowed = len(d.Refusals) == 0
