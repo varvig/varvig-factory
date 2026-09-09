@@ -106,7 +106,7 @@ func GoProbes() []Probe {
 	}}
 }
 
-// Fake is a Sandbox for tests and the demo: it reports a fixed fragment and
+// Fake is a Sandbox for tests and the simulator: it reports a fixed fragment and
 // returns scripted results without running anything. Like inference.Fake it is
 // in the non-test build so the full lifecycle is exercisable on a machine with
 // no toolchain at all.

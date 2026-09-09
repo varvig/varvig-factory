@@ -14,7 +14,7 @@ import (
 	"github.com/varvig/varvig-factory/cell"
 )
 
-// Fake is an in-memory Varvig for tests and the runnable demo. It models the
+// Fake is an in-memory Varvig for tests and the simulator. It models the
 // parts of varvig that Factory's behaviour turns on — refs moved by
 // compare-and-swap, content-addressed objects, notes, the speculation pool, and
 // peer-to-peer exchange with an upstream that can be partitioned — and nothing

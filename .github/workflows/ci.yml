@@ -87,11 +87,11 @@ jobs:
       - name: guards
         run: go test -v ./guard/
 
-      # The runnable demo is documentation that either works or does not. Running
-      # it in CI means the README's "go run ./cmd/factory-demo" cannot rot into an
-      # instruction that fails on a clean checkout.
-      - name: demo
-        run: go run ./cmd/factory-demo
+      # The simulator is documentation that either works or does not. Running it
+      # in CI means the README's "go run ./cmd/factory-simulator" cannot rot into
+      # an instruction that fails on a clean checkout.
+      - name: simulator
+        run: go run ./cmd/factory-simulator
 
       # Build the real varvig and run the integration tests against it.
       #

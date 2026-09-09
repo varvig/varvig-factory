@@ -615,7 +615,7 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 	// The two replicas.
 	//
 	// A caller that supplied its own client — every test, and the in-process
-	// demo — gets the collapsed configuration, because one client is one
+	// simulator — gets the collapsed configuration, because one client is one
 	// repository however many roles it plays. Combining that with a configured
 	// factory_repo is refused rather than resolved: building a disk-backed
 	// factory client alongside a supplied in-memory one would send authority

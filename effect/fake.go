@@ -8,14 +8,14 @@ import (
 	"github.com/varvig/varvig-factory/cell"
 )
 
-// Fake is an in-memory Executor for tests and the demo.
+// Fake is an in-memory Executor for tests and the simulator.
 //
 // It exists mostly to make one thing assertable that nothing else can: **how
 // many times the effect actually happened.** Every guard in this package is
 // ultimately about that number being 1, and a test that cannot count it is
 // testing the guard's error message rather than its effect.
 //
-// It is in the non-test file deliberately, so the demo and a cell's own
+// It is in the non-test file deliberately, so the simulator and a cell's own
 // dry-run configuration can use it. A fake purchasing integration that refuses
 // to spend anything is a genuinely useful thing to point a cell at while
 // setting one up.

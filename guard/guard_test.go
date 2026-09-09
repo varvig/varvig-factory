@@ -160,13 +160,13 @@ func TestFactorySubmitsAndDoesNotSerialize(t *testing.T) {
 	//
 	// Two exemptions, both for code that plays the *author* rather than the cell:
 	// varvigcli itself, which parses a scope out of varvig's output, and
-	// cmd/factory-demo, which seeds a repository with tickets — work a human does
-	// with `varvig tickets scope` and which has to come from somewhere for a demo
+	// cmd/factory-simulator, which seeds a repository with tickets — work a human does
+	// with `varvig tickets scope` and which has to come from somewhere for a simulator
 	// to have anything to run against.
 	var violations []string
 	fset := token.NewFileSet()
 	for _, path := range goFiles(t, root, "varvigcli") {
-		if strings.HasPrefix(relPath(root, path), "cmd/factory-demo/") {
+		if strings.HasPrefix(relPath(root, path), "cmd/factory-simulator/") {
 			continue
 		}
 		f, err := parser.ParseFile(fset, path, nil, 0)
