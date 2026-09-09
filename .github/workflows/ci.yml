@@ -115,7 +115,7 @@ jobs:
           cd /tmp/varvig/varvig && go build -o /usr/local/bin/varvig ./cmd/varvig
           cd "$GITHUB_WORKSPACE"
           varvig --version
-          go test -v -run Integration ./varvigcli/ ./authority/ ./effect/ ./loop/
+          go test -v -run Integration ./varvigcli/ ./authority/ ./effect/ ./loop/ ./cmd/varvig-factory/
 
       # The README promises this module has no third-party dependencies, and a
       # vendor SDK behind an adapter would be the vendor leaking through the seam
