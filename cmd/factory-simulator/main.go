@@ -1,9 +1,14 @@
-// Command factory-demo runs the Medium prototype from FACTORY.md §10.7 — two
-// cells and one rendezvous peer — end to end, against in-memory fakes.
+// Command factory-simulator runs a factory from FACTORY.md §10.7 — two cells
+// and one rendezvous peer — end to end, against in-memory fakes.
 //
 // It exists for the same reason varvig-connectors ships a reference connector:
 // the interesting parts of this system are the interactions, and a description
-// of an interaction is not a demonstration of one. In four phases it shows:
+// of an interaction is not a demonstration of one. Every step below is a real
+// write to real repository state through the real loop, claim policy and
+// authority arithmetic; only the model, the sandbox and the vendor are faked.
+//
+// In six phases it puts a factory through conditions rather than illustrating
+// them:
 //
 //  1. a Mini cell attempts a ticket, and a Micro cell independently verifies it
 //     — which is what makes autonomous promotion defensible at all (§3.2)
@@ -13,6 +18,14 @@
 //     survive reconnect (§9.2) — correct behaviour, not a bug
 //  4. autonomous promotion, once the agreement metric exists and the path is
 //     enabled — then the kill switch, which stops it without a restart (§6.5)
+//  5. authority under three days offline: a lease is spendable, a promotion is
+//     not, and a tightened envelope bites before the next order (§4.3b, §6.7)
+//  6. a ticket that orders a physical thing, down the loop's effectful branch
+//
+// Honest about what it is: **one scripted run, not a parameter space.** There
+// are no flags and no randomness, the clock is advanced by the script, and each
+// beat prints the conclusion it just established. It simulates conditions; it
+// does not let you vary them.
 //
 // No varvig binary, no GPU, no network. What it does not demonstrate is
 // anything about a real model's output quality; that is the one thing a fake
@@ -52,14 +65,14 @@ var (
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintf(os.Stderr, "factory-demo: %v\n", err)
+		fmt.Fprintf(os.Stderr, "factory-simulator: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
 	ctx := context.Background()
-	work, err := os.MkdirTemp("", "factory-demo-*")
+	work, err := os.MkdirTemp("", "factory-simulator-*")
 	if err != nil {
 		return err
 	}
@@ -74,7 +87,7 @@ func run() error {
 	micro := newCell(work, "micro-b", upstream, verifyRoles(), noTier())
 
 	// Both cells start from the rendezvous peer's state.
-	for _, c := range []*demoCell{mini, micro} {
+	for _, c := range []*simCell{mini, micro} {
 		if err := c.v.Fetch("upstream", branch); err != nil {
 			return err
 		}
@@ -125,8 +138,8 @@ func run() error {
 
 	// A policy module that would allow this promotion. In a real cell it is a
 	// content-addressed wasm object in the repository, run in varvig's WASI
-	// sandbox; here it is a function, because the demo has no wasm toolchain.
-	for _, c := range []*demoCell{mini, micro} {
+	// sandbox; here it is a function, because the simulator has no wasm toolchain.
+	for _, c := range []*simCell{mini, micro} {
 		c.v.BindHook(gate.Event, func([]byte) varvigcli.HookResult {
 			return varvigcli.HookResult{ExitCode: 0, Stdout: "evidence passes, class matches"}
 		})
@@ -158,21 +171,21 @@ func run() error {
 	section("phase 3: partition — both cells claim the same task, both attempts survive (§9.2)")
 
 	second := "c3feed0000000000000000000000000000000000000000000000000000000003"
-	for _, c := range []*demoCell{mini, micro} {
+	for _, c := range []*simCell{mini, micro} {
 		c.v.AddTicket(second, "Add B to src.\n", scope, "approved")
 	}
 	// micro-b takes the attempt role for this phase, so there are two attempting
 	// cells to partition. Same binary, same code — one field of configuration.
 	micro.cell.Capabilities.Roles = append(micro.cell.Capabilities.Roles, cell.RoleAttempt)
 	micro.cell.Capabilities.Inference = largeTier()
-	micro.cell.Inference = &inference.Fake{Reply: "--- src/b.go\npackage src\n\nfunc BFromMicro() {}\n", Model: "demo-model"}
+	micro.cell.Inference = &inference.Fake{Reply: "--- src/b.go\npackage src\n\nfunc BFromMicro() {}\n", Model: "sim-model"}
 	micro.ledgerRefill()
 
 	mini.v.Partitioned = true
 	micro.v.Partitioned = true
 	fmt.Println("  upstream unreachable from both cells")
 
-	for _, c := range []*demoCell{mini, micro} {
+	for _, c := range []*simCell{mini, micro} {
 		rep, err := c.cell.Once(ctx)
 		if err != nil {
 			return err
@@ -506,13 +519,13 @@ func run() error {
 	return nil
 }
 
-// demoCell is a cell plus the handles the demo needs to poke at it.
-type demoCell struct {
+// simCell is a cell plus the handles the simulator needs to poke at it.
+type simCell struct {
 	cell *loop.Cell
 	v    *varvigcli.Fake
-	// The demo is a single-project factory, so one replica serves both roles.
+	// The simulator is a single-project factory, so one replica serves both roles.
 	// The handles are still two, because the call sites still say which role
-	// they are in — which is what keeps the demo an illustration of the real
+	// they are in — which is what keeps the simulator a run of the real
 	// shape rather than of the shortcut.
 	factory     varvigcli.FactoryRepo
 	project     varvigcli.ProjectRepo
@@ -524,7 +537,7 @@ type demoCell struct {
 	work        string
 }
 
-func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf cell.Inference) *demoCell {
+func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf cell.Inference) *simCell {
 	v := varvigcli.NewFake(id)
 	seedTicket(v)
 	v.Upstream = upstream
@@ -543,7 +556,7 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 	must(err)
 
 	factory, project := varvigcli.Collapsed(v)
-	d := &demoCell{v: v, factory: factory, project: project,
+	d := &simCell{v: v, factory: factory, project: project,
 		sw: sw, ledger: ledger, switchPath: switchPath,
 		fingerprint: "SHA256:" + id, budget: b, work: work}
 
@@ -551,7 +564,7 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 	if inf.Tier != cell.TierNone {
 		runtime = &inference.Fake{
 			Reply: "--- src/a.go\npackage src\n\nfunc AFrom" + id + "() {}\n",
-			Model: "demo-model",
+			Model: "sim-model",
 		}
 	}
 	d.cell = &loop.Cell{
@@ -565,7 +578,7 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 		Sandbox:   &sandbox.Fake{},
 		Artifacts: &artifact.LocalCAS{Root: filepath.Join(work, id, "artifacts")},
 		Ledger:    ledger,
-		// The demo's one replica serves both roles, so the same rendezvous set
+		// The simulator's one replica serves both roles, so the same rendezvous set
 		// serves both — stated explicitly, because there is no fallback that
 		// would guess it (see profile.Config.FactoryRendezvous).
 		Rendezvous:        loop.Peers{"upstream"},
@@ -595,8 +608,8 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 }
 
 // ledgerRefill gives a cell that has just taken the attempt role a budget to
-// attempt with — the demo's stand-in for an operator editing the config.
-func (d *demoCell) ledgerRefill() {
+// attempt with — the simulator's stand-in for an operator editing the config.
+func (d *simCell) ledgerRefill() {
 	b := budget.Budget{InferenceDaily: 10000, PerCallCost: 100, VerifyConcurrent: 2, StorageGB: 10, AttemptsDefault: 1}
 	ledger, err := budget.NewLedger(b, "", clock)
 	must(err)
@@ -605,7 +618,7 @@ func (d *demoCell) ledgerRefill() {
 
 // attemptFresh makes one more attempt at a new ticket, so a promotion decision
 // has something not already promoted to consider.
-func (d *demoCell) attemptFresh(ctx context.Context) (loop.AttemptResult, error) {
+func (d *simCell) attemptFresh(ctx context.Context) (loop.AttemptResult, error) {
 	fresh := "d4face0000000000000000000000000000000000000000000000000000000004"
 	d.v.AddTicket(fresh, "Add C to src.\n", scope, "approved")
 	rep, err := d.cell.Once(ctx)
@@ -622,7 +635,7 @@ func (d *demoCell) attemptFresh(ctx context.Context) (loop.AttemptResult, error)
 
 // request assembles a promotion decision's inputs by reading them back out of the
 // repository, exactly as the loop does.
-func (d *demoCell) request(att loop.AttemptResult) promote.Request {
+func (d *simCell) request(att loop.AttemptResult) promote.Request {
 	req := promote.Request{
 		Attempt: cell.Attempt{
 			CellID: d.cell.Capabilities.CellID, Task: att.Task, N: att.N,
@@ -710,7 +723,7 @@ func attemptRoles() []cell.Role {
 func verifyRoles() []cell.Role { return []cell.Role{cell.RoleBuild, cell.RoleVerify} }
 
 func largeTier() cell.Inference {
-	return cell.Inference{Tier: cell.TierLarge, Models: []cell.Model{{ID: "demo-model"}}}
+	return cell.Inference{Tier: cell.TierLarge, Models: []cell.Model{{ID: "sim-model"}}}
 }
 
 func noTier() cell.Inference { return cell.Inference{Tier: cell.TierNone} }
@@ -763,5 +776,5 @@ func must(err error) {
 }
 
 // jsonUnmarshal is encoding/json's Unmarshal, wrapped so the one place that
-// needs it does not put a bare import at the top of a demo.
+// needs it does not put a bare import at the top of a simulator.
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }

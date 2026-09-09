@@ -47,12 +47,12 @@ and it was written before any daemon code — it is what lets a Micro cell built
 today join a federation built later, and it is expensive to retrofit once cells
 exist and have written state.
 
-Then run [`cmd/factory-demo`](./cmd/factory-demo/main.go) — a committed program,
-not a scratch script, and the executable version of the argument this README
-makes:
+Then run [`cmd/factory-simulator`](./cmd/factory-simulator/main.go) — a
+committed program, not a scratch script, and the executable version of the
+argument this README makes:
 
 ```sh
-go run ./cmd/factory-demo
+go run ./cmd/factory-simulator
 ```
 
 Six phases against in-memory fakes. A Mini cell attempts and a Micro cell
@@ -61,10 +61,19 @@ none of them; a partition where both cells attempt the same task and both
 attempts survive reconnect; autonomous promotion, earned per scope, stopped two
 different ways by the kill switch; and finally a disconnected cell refused a
 promotion while it goes on spending its lease, reserving, settling above quote,
-and being refused a second pending order and a self-authorized one; and finally
-a ticket driving a real order through the loop — placed by micro-b, the cell
-with no model at all, because authority to spend is a lease and not a GPU. No
-varvig binary, no GPU, no network.
+and being refused a second pending order and a self-authorized one; and last a
+ticket driving a real order through the loop — placed by micro-b, the cell with
+no model at all, because authority to spend is a lease and not a GPU. No varvig
+binary, no GPU, no network.
+
+It is called a simulator because it puts a factory through conditions —
+partition, three days offline, an overseer tightening a ceiling mid-run — rather
+than illustrating them, and every step is a real write through the real loop,
+claim policy and authority arithmetic. It is worth being equally plain about
+what it is not: **one scripted run, not a parameter space.** No flags, no
+randomness, a clock the script advances itself, and each beat prints the
+conclusion it just established. It simulates conditions; it does not let you
+vary them.
 
 ## Quick start against a real repository
 
@@ -681,39 +690,39 @@ degrading quietly is not.
 ## Layout
 
 ```
-CELL.md              the cell contract — normative, read this first
-cell/                the contract in code: names, capabilities, evidence,
-                     environment + its hash, claims. No dependencies on anything.
-varvigcli/           the Varvig interface + an Exec adapter over the public CLI,
-                     the FactoryRepo/ProjectRepo handles that keep the two
-                     repository kinds apart, and an in-memory Fake that models
-                     refs-with-CAS, notes, the speculation pool and a
-                     partitionable upstream
-inference/           model-runtime seam
-sandbox/             build-sandbox seam
-artifact/            artifact-store seam
-budget/              spend caps, halt behaviour, storage-pressure relief
-authority/           envelopes and leases: shared ceilings versus exclusive
-                     allocations, what a stale view still permits, and the refs
-                     they live in — all of it in the coordination repo
-iface/               the interface registry: schemas as objects, resolvable by
-                     the hash a capability names
-reputation/          per-cell standing, derived from what was promoted
-effect/              effectful, non-regenerable capabilities — the refusals,
-                     reserve/execute/settle over a reservation ref, and the
-                     executor seam (with a refusing default and a counting fake)
-claim/               claim policy: should this cell attempt this ticket?
-loop/                the ten-step cell loop, and verification of peer attempts
-gate/                the wasm promotion-policy module interface
-agreement/           the promotion-agreement metric, per scope
-promote/             both modes, the five conditions, the kill switch
-profile/             micro/mini/medium as configuration, and the wiring
-conformance/         the spec's §9 tests for the single-cell contract (the
-                     authority ones live with the packages they constrain)
-guard/               build-failing guards: no second scheduler, no branching
-                     on cell class, no third-party dependencies
-cmd/varvig-factory/  the cell binary
-cmd/factory-demo/    the runnable Medium prototype
+CELL.md                 the cell contract — normative, read this first
+cell/                   the contract in code: names, capabilities, evidence,
+                        environment + its hash, claims. No dependencies on anything.
+varvigcli/              the Varvig interface + an Exec adapter over the public CLI,
+                        the FactoryRepo/ProjectRepo handles that keep the two
+                        repository kinds apart, and an in-memory Fake that models
+                        refs-with-CAS, notes, the speculation pool and a
+                        partitionable upstream
+inference/              model-runtime seam
+sandbox/                build-sandbox seam
+artifact/               artifact-store seam
+budget/                 spend caps, halt behaviour, storage-pressure relief
+authority/              envelopes and leases: shared ceilings versus exclusive
+                        allocations, what a stale view still permits, and the refs
+                        they live in — all of it in the coordination repo
+iface/                  the interface registry: schemas as objects, resolvable by
+                        the hash a capability names
+reputation/             per-cell standing, derived from what was promoted
+effect/                 effectful, non-regenerable capabilities — the refusals,
+                        reserve/execute/settle over a reservation ref, and the
+                        executor seam (with a refusing default and a counting fake)
+claim/                  claim policy: should this cell attempt this ticket?
+loop/                   the ten-step cell loop, and verification of peer attempts
+gate/                   the wasm promotion-policy module interface
+agreement/              the promotion-agreement metric, per scope
+promote/                both modes, the five conditions, the kill switch
+profile/                micro/mini/medium as configuration, and the wiring
+conformance/            the spec's §9 tests for the single-cell contract (the
+                        authority ones live with the packages they constrain)
+guard/                  build-failing guards: no second scheduler, no branching
+                        on cell class, no third-party dependencies
+cmd/varvig-factory/     the cell binary
+cmd/factory-simulator/  a factory put through six conditions, end to end
 ```
 
 Nothing here imports varvig's Go packages. The binding is the CLI and the wire
@@ -1152,7 +1161,7 @@ The spec's §10, and what shipped for each step:
 | 4. Mini profile: attempting enabled, config only | `profile.Mini` |
 | 5. Budget enforcement and halt behaviour | `budget/` |
 | 6. `artifact-ref` production, cell-local retention | `artifact/`, `loop.recordArtifacts` |
-| 7. Upstream sync, claims, pins — two cells, one upstream | `claim/`, `cmd/factory-demo` |
+| 7. Upstream sync, claims, pins — two cells, one upstream | `claim/`, `cmd/factory-simulator` |
 | 8. Partition and offline suite before anything depends on claim semantics | `conformance/` §9.2, §9.3 |
 | 9. Promotion policy module, still gated — runs and logs without acting | `gate/`, `promote/` |
 | 10. Agreement-rate measurement, per scope | `agreement/` |

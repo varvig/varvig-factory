@@ -7,7 +7,7 @@ import (
 	"github.com/varvig/varvig-factory/cell"
 )
 
-// Fake is a deterministic Runtime for tests and for the runnable demo. It is in
+// Fake is a deterministic Runtime for tests and for the simulator. It is in
 // the non-test build for the same reason tracker.Mem is in varvig-connectors':
 // the whole cell lifecycle has to be exercisable with no GPU, no server, and no
 // spend, or the §9 test suite would only ever run on the machine that has one.
