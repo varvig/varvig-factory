@@ -1,6 +1,6 @@
 # The Cell Contract
 
-*Normative. Version 7* — makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
+*Normative. Version 8* — separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
 effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
@@ -226,6 +226,47 @@ up. A cell needs both to act, and holding either alone means it declines.
 without ever attempting (§2.1, §3.3). Micro ships `["build", "verify"]`;
 attempting is opt-in, because a CPU-local model authoring code loses nearly
 every selection while still consuming review attention (§3.1).
+
+#### Cell class and inference are orthogonal
+
+The capacity class — Micro, Mini, Medium — describes **build and test capacity
+only.** It says nothing about inference, because inference reaches a cell
+through an executor that may perfectly well be a hosted API, which makes it a
+*capability* and not a hardware fact (§3).
+
+So all four combinations are legitimate, and the two that are less obvious are
+the ones worth naming: a Micro cell reaching a hosted model over HTTP is an
+**inference cell**, and a Mini cell with no model configured is a **policy
+cell**. Neither is a misconfiguration. If a reader ever has to be told which
+class implies a model, the two axes have been welded together again.
+
+A **policy cell** is not a degraded cell. It verifies, builds, executes
+effectful capabilities and syncs, and the evidence it produces is what licenses
+another cell's attempt to be promoted autonomously (§6.3.1) — the cheapest
+hardware in the factory produces what makes the expensive hardware
+trustworthy. Its one limit: it cannot originate work. It needs tickets from
+somewhere and attempts to verify.
+
+#### A declared model is not a reachable one
+
+The `inference` block is a declaration, and this object holds static facts only.
+Whether the runtime answers *right now* is a runtime fact, and it lives nowhere
+in here.
+
+The two are checked in different places and refused in different ways:
+
+| Question | Where | On failure |
+|---|---|---|
+| Does the declaration cohere — does a cell advertising `attempt` declare a model? | this object's validation | the configuration is rejected |
+| Does the runtime answer this pass? | the cell loop, once per pass | the cell **declines to attempt** and carries on |
+
+The second row is the one worth stating plainly, because it used to be wrong. A
+cell holding the attempt role with an unreachable runtime refused to *start*, so
+it did none of the syncing, verifying or building it was still perfectly capable
+of — one unavailable capability disabled every available one. A cell whose model
+has gone away is not misconfigured; it is a cell with less to offer this pass,
+and it says which runtime declined and why. It resumes attempting when the
+runtime returns, with no restart.
 
 Encoding is canonical JSON as defined in §4.3, so two cells configured
 identically publish byte-identical capabilities.

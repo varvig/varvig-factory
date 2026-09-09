@@ -105,11 +105,28 @@ Run `varvig-factory` with no arguments for the full command list.
 it carries no authority. Scaling means more cells or bigger cells — never a
 topology change.
 
-| Cell class | Inference | Recommended roles |
+| Cell class | Build and test capacity | Roles the template ships |
 |---|---|---|
-| **Micro** | CPU-local small model | `verify`, `build` — *not* `attempt` by default |
-| **Mini** | GPU-local model | `attempt`, `verify`, `build` |
-| **Medium** | heavy / multi-GPU / distributed local execution | `attempt`, `verify`, `build` |
+| **Micro** | small / commodity | `verify`, `build` — *not* `attempt` by default |
+| **Mini** | accelerated or high-core single host | `attempt`, `verify`, `build` |
+| **Medium** | Mini, plus a rendezvous set to sync with | `attempt`, `verify`, `build` |
+
+**Class describes capacity, not inference.** Inference reaches a cell through an
+executor that may be a hosted API, so it is a capability rather than a hardware
+fact — which makes the two axes orthogonal, and makes the less obvious
+combinations legitimate:
+
+```go
+profile.Micro(id).WithInference(hosted)  // a commodity host that authors through an API
+profile.Mini(id).WithoutInference()      // a high-core host that only verifies and builds
+```
+
+The distinction that matters more than the class is **policy cell** (no model
+configured) versus **inference cell** (one is). A policy cell is not degraded: it
+verifies, builds, executes effectful capabilities and syncs, and the evidence it
+produces is what licenses another cell's attempt to be promoted autonomously.
+The cheapest hardware in the factory produces what makes the expensive hardware
+trustworthy. Its one limit is that it cannot originate work.
 
 A factory is one or more cooperating cells, flat:
 
@@ -129,7 +146,7 @@ are explicitly not in this design; flat membership plus scoped authority covers
 the same ground with less machinery.
 
 Classes are **configuration profiles, not code paths**. Micro and Mini differ
-only in which model runtime and budget the config names; `profile.Wire` — the one
+only in the field values the config names; `profile.Wire` — the one
 function that turns a config into a running cell — never reads the profile name,
 and [a test](./profile/profile_test.go) reads its syntax tree to prove it. If a
 class ever requires a branch in the code, the abstraction has failed.
@@ -146,6 +163,21 @@ and build cell**: deterministic work, cheap, no model-quality problem, and it
 makes the old-hardware story genuinely compelling rather than aspirational.
 
 So Micro ships with `roles: ["build", "verify"]` and attempting is opt-in.
+
+### An unreachable model is a decline, not a breakdown
+
+A cell configured for a model whose runtime stops answering keeps running. It
+syncs, verifies other cells' attempts, builds, executes effectful capabilities,
+and declines the tickets it would have authored — saying which runtime declined
+and why, once per pass. When the runtime comes back it resumes attempting, with
+no restart and nothing to reconfigure.
+
+This is worth spelling out because it used to be false: such a cell failed its
+startup validation and did nothing at all, so one unavailable capability
+disabled every available one. A cell whose model has gone away is not
+misconfigured; it is a cell with less to offer this pass. Reachability is
+therefore measured per pass and reaches claim policy as an input, where it
+declines attempts and touches nothing else.
 
 ### Independent verification is a property of flat membership
 

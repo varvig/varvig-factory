@@ -277,3 +277,78 @@ func TestTemplateRejectsAnUnknownName(t *testing.T) {
 		t.Fatal("an unknown profile name was accepted")
 	}
 }
+
+// hostedModel is inference that arrives over an API rather than from local
+// hardware — the configuration that makes cell class and inference orthogonal
+// rather than two names for one thing.
+func hostedModel() InferenceConfig {
+	return InferenceConfig{
+		Kind:         "http",
+		Tier:         cell.TierLarge,
+		Endpoint:     "https://api.example/v1/chat/completions",
+		Model:        "hosted-large",
+		ModelVersion: "2026-08",
+		Context:      200000,
+		AuthHeader:   "Authorization",
+		AuthValueEnv: "MODEL_TOKEN",
+	}
+}
+
+func TestClassAndInferenceAreOrthogonal(t *testing.T) {
+	// §3 and refactor patch §2: cell class describes build and test capacity
+	// only. Inference reaches a cell through an executor that may be a hosted
+	// API, so it is a capability and not a hardware fact — which means both
+	// cross-combinations have to work, not just the two the templates ship.
+	//
+	// The templates used to make this false by construction: Micro *was* the
+	// no-model class and Mini *was* the model class, so "which class is it"
+	// answered "does it attempt", and there was no way to say the other two
+	// things.
+	t.Run("a commodity host can author through an API", func(t *testing.T) {
+		c := Micro("micro-a").WithInference(hostedModel())
+		if err := c.Validate(); err != nil {
+			t.Fatalf("a Micro cell with a hosted model was rejected: %v", err)
+		}
+		caps := c.Capabilities()
+		if !caps.InferenceCell() {
+			t.Fatal("a Micro cell with a hosted model does not read as an inference cell")
+		}
+		if !caps.Has(cell.RoleAttempt) {
+			t.Fatal("a cell with a model configured did not get the attempt role")
+		}
+		// And it is still Micro: the class is about capacity, and attaching a
+		// model must not silently promote it.
+		if c.Profile != "micro" {
+			t.Fatalf("class changed to %q by attaching a model", c.Profile)
+		}
+		if got, want := len(caps.Test), len(Micro("x").Capabilities().Test); got != want {
+			t.Fatalf("test capacity changed with the model: %d entries, want %d", got, want)
+		}
+	})
+
+	t.Run("a high-capacity host can be a policy cell", func(t *testing.T) {
+		c := Mini("mini-a").WithoutInference()
+		if err := c.Validate(); err != nil {
+			t.Fatalf("a Mini cell with no model was rejected: %v", err)
+		}
+		caps := c.Capabilities()
+		if !caps.PolicyCell() {
+			t.Fatal("a Mini cell with no model does not read as a policy cell")
+		}
+		if caps.Has(cell.RoleAttempt) {
+			t.Fatal("a cell with no model kept the attempt role, advertising what it cannot do")
+		}
+		// It keeps Mini's capacity — that is the whole point of the two axes
+		// being separate — and keeps the roles that do not need a model.
+		if !caps.Has(cell.RoleVerify) || !caps.Has(cell.RoleBuild) {
+			t.Fatalf("stripping the model cost it the deterministic roles: %v", caps.Roles)
+		}
+		if len(caps.Test) != len(Mini("x").Capabilities().Test) {
+			t.Fatal("test capacity changed when the model was removed")
+		}
+		// No cap on spending that cannot happen.
+		if c.Budget.InferenceDaily != 0 || c.Budget.PerCallCost != 0 {
+			t.Fatalf("a policy cell kept an inference budget: %+v", c.Budget)
+		}
+	})
+}

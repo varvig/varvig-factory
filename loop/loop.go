@@ -262,24 +262,57 @@ func (c *Cell) Validate(ctx context.Context) error {
 	if c.ClaimTTL <= 0 {
 		return errors.New("loop: claim ttl must be positive; an unexpiring claim is a lock")
 	}
-	// Every adapter must be able to describe itself, checked once at startup
-	// rather than at the first attempt (§4). A cell that cannot describe its
-	// environment cannot participate in cross-cell selection, so it should not
-	// start and produce evidence nobody can compare.
+	// The build sandbox must be able to describe itself, checked once at startup
+	// rather than at the first attempt (§4). A cell that cannot describe the
+	// environment its tests run in cannot participate in cross-cell selection,
+	// so it should not start and produce evidence nobody can compare.
 	if c.Sandbox != nil {
 		if _, err := c.Sandbox.Fragment(ctx); err != nil {
 			return fmt.Errorf("loop: sandbox adapter: %w", err)
 		}
 	}
-	if c.Capabilities.Has(cell.RoleAttempt) {
-		if c.Inference == nil {
-			return errors.New("loop: cell holds the attempt role but has no model runtime")
-		}
-		if _, err := c.Inference.Fragment(ctx); err != nil {
-			return fmt.Errorf("loop: model runtime adapter: %w", err)
-		}
-	}
+	// The model runtime is deliberately **not** checked here, and the asymmetry
+	// with the sandbox above is the §9.17 rule rather than an oversight.
+	//
+	// This used to refuse to start when a cell held the attempt role and its
+	// runtime was absent or could not describe itself. That took a cell still
+	// capable of every deterministic job in the factory — syncing, verifying
+	// other cells' attempts, building, executing effectful capabilities — and
+	// stopped it doing any of them, because one of the things it could do had
+	// become unavailable. A cell whose model has gone away is not
+	// misconfigured; it is a cell with less to offer this pass.
+	//
+	// So reachability is measured per pass and reaches claim policy as an input
+	// (claim.Inputs.ExecutorReachable), where it declines attempts and nothing
+	// else. The sandbox stays fatal because a cell that cannot describe its
+	// build environment cannot do the deterministic work either, so there would
+	// be nothing left to degrade to.
 	return nil
+}
+
+// executorReachable asks the model runtime whether it can describe itself, and
+// is the loop's answer to "can this cell author anything right now".
+//
+// Fragment is the probe because it is the one call that must be a measurement
+// rather than a configured claim (§4): a runtime that answers it is reachable
+// and can also say what environment its output was produced in, which is what
+// an attempt needs. A runtime that does not answer might be down, unconfigured,
+// or newly indescribable, and the cell treats all three the same way — it does
+// not attempt, and it says which runtime declined and why.
+//
+// A cell with no attempt role is not asked. It has no runtime to speak of and
+// claim policy stops at the role before it ever consults this.
+func (c *Cell) executorReachable(ctx context.Context) (bool, string) {
+	if !c.Capabilities.Has(cell.RoleAttempt) {
+		return false, "cell does not attempt"
+	}
+	if c.Inference == nil {
+		return false, "no model runtime is configured for a cell that advertises attempting"
+	}
+	if _, err := c.Inference.Fragment(ctx); err != nil {
+		return false, fmt.Sprintf("model runtime %s cannot describe itself: %v", c.Inference.Name(), err)
+	}
+	return true, ""
 }
 
 // PublishCapabilities writes this cell's capabilities object to its ref (§2).
@@ -378,6 +411,17 @@ func (c *Cell) Once(ctx context.Context) (Report, error) {
 	// capability, and nothing about it changes between two tickets in one pass.
 	grants := c.effectGrants()
 
+	// Same reasoning for the executor, plus one more: probing it is a network
+	// call for a hosted runtime, and asking once per ticket would turn a pass
+	// over twenty tickets into twenty version requests.
+	authoring, authoringWhy := c.executorReachable(ctx)
+	if !authoring && c.Capabilities.Has(cell.RoleAttempt) {
+		// Said once per pass rather than once per ticket, and said at all
+		// because a cell quietly declining everything looks identical to a cell
+		// with nothing to do (§9.17).
+		c.logf("not attempting this pass: %s", authoringWhy)
+	}
+
 	for _, t := range tickets {
 		spend := c.Ledger.CanSpend(c.now(), rep.Offline)
 		// An effectful action writes no attempt ref, so its record of "already
@@ -391,6 +435,8 @@ func (c *Cell) Once(ctx context.Context) (Report, error) {
 			Ticket:             t,
 			BudgetOK:           spend.OK,
 			BudgetReason:       string(spend.Reason),
+			ExecutorReachable:  authoring,
+			ExecutorReason:     authoringWhy,
 			OwnAttempts:        own,
 			MaxAttemptsPerCell: c.maxAttempts(t),
 			ForeignClaims:      claims[t.ID],
