@@ -278,6 +278,13 @@ type EffectCapabilityConfig struct {
 	// here the ambiguity would be resolved by spending money (§2.1).
 	ID        string `json:"id"`
 	Interface string `json:"interface"`
+	// CostModel is "fixed", "quoted", or absent for a capability that costs
+	// nothing (§7.0). Absent is a real and common answer — a light switch, a
+	// robot arm, a print with filament already paid for — and it means no lease
+	// is needed, so the operator declaring it here is declaring that no budget
+	// gates this action. An action that then reports a cost is refused as
+	// malformed rather than run unmetered.
+	CostModel cell.CostModel `json:"cost_model,omitempty"`
 	// Executor selects how this capability is performed:
 	//
 	//	"connector"  a connector peer takes the offer and reports (the default
@@ -463,7 +470,7 @@ func (c Config) Capabilities() cell.Capabilities {
 		}}
 	}
 	for _, e := range c.Effects.Capabilities {
-		caps.Effects = append(caps.Effects, cell.EffectCapability{ID: e.ID, Interface: e.Interface})
+		caps.Effects = append(caps.Effects, cell.EffectCapability{ID: e.ID, Interface: e.Interface, CostModel: e.CostModel})
 	}
 	caps.Normalize()
 	return caps

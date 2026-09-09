@@ -96,7 +96,7 @@ func TestIntegrationEffectfulTicketAgainstRealCore(t *testing.T) {
 	c := &Cell{
 		Capabilities: cell.Capabilities{
 			CellID:  "mini-a",
-			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: ifaceHash}},
+			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: ifaceHash, CostModel: cell.CostFixed}},
 		},
 		Factory:            fr,
 		Project:            pr,

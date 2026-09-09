@@ -73,6 +73,40 @@ type Capabilities struct {
 	Effects []EffectCapability `json:"effects,omitempty"`
 }
 
+// CostModel says how an effectful capability's price is known, and whether it
+// has one at all.
+//
+// It lives in the cell contract rather than in the effect package because it is
+// declared by configuration, alongside the capability it describes — and
+// because where it is declared decides who gets to declare it. A ticket must
+// never be able to say a capability is free; that is how a board order becomes
+// unmetered.
+type CostModel string
+
+// The cost models. The empty value is meaningful and is the third case: a
+// capability that declares no cost model **incurs no cost**, needs no lease,
+// and is bounded only by the envelope's quantity and rate ceilings (§7.0).
+// `effectful` and `costs money` are orthogonal.
+const (
+	// CostFixed is a price known from the capability contract.
+	CostFixed CostModel = "fixed"
+	// CostQuoted means the price is not known until an external service is
+	// asked, so such capabilities require connectivity by their nature.
+	CostQuoted CostModel = "quoted"
+)
+
+// Valid reports whether m is one of the three legitimate states.
+func (m CostModel) Valid() bool {
+	switch m {
+	case "", CostFixed, CostQuoted:
+		return true
+	}
+	return false
+}
+
+// Priced reports whether a capability with this cost model needs a lease.
+func (m CostModel) Priced() bool { return m != "" }
+
 // EffectCapability names one effectful capability a cell can perform.
 type EffectCapability struct {
 	// ID is the alias, e.g. "pcb-fabrication@1".
@@ -81,6 +115,12 @@ type EffectCapability struct {
 	// required: two factories may use one alias for different interfaces, and
 	// here that ambiguity would be resolved by spending money (§2.1).
 	Interface string `json:"interface"`
+	// CostModel is how this capability's price is known, empty when it costs
+	// nothing (§7.0). An empty value is a claim that the capability is free,
+	// and §7.0's guard is what keeps that claim honest: an action that reports
+	// a cost against a capability declaring no cost model is refused as
+	// malformed rather than run unmetered.
+	CostModel CostModel `json:"cost_model,omitempty"`
 }
 
 // Normalize sorts and deduplicates every list so that two cells configured
@@ -162,6 +202,9 @@ func (c Capabilities) Validate() error {
 		}
 		if !IsMultihash(e.Interface) {
 			return fmt.Errorf("cell: effectful capability %q names interface %q, which is not an object hash", e.ID, e.Interface)
+		}
+		if !e.CostModel.Valid() {
+			return fmt.Errorf("cell: effectful capability %q declares an unknown cost model %q", e.ID, e.CostModel)
 		}
 		if seen[e.ID] {
 			// Two entries for one alias would make "which interface does this
@@ -272,4 +315,21 @@ func covers(have, want []string) bool {
 		}
 	}
 	return true
+}
+
+// Effect returns the configured effectful capability with this alias.
+//
+// The lookup exists so a caller takes the capability's terms — its interface
+// and its cost model — from **this cell's configuration** rather than from the
+// ticket asking for the work. That direction is the point: a ticket names what
+// it wants done, and an operator decides what performing it costs. Reading the
+// cost model off the request would let a ticket declare a priced capability
+// free and slip past the lease entirely.
+func (c Capabilities) Effect(id string) (EffectCapability, bool) {
+	for _, e := range c.Effects {
+		if e.ID == id {
+			return e, true
+		}
+	}
+	return EffectCapability{}, false
 }

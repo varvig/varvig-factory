@@ -88,6 +88,21 @@ type Reservation struct {
 	Amount   cell.Money `json:"amount_minor,omitempty"`
 	Unit     string     `json:"unit,omitempty"`
 	Quantity int64      `json:"quantity,omitempty"`
+	// Free records that this action's capability declared no cost model, so no
+	// lease backs it and none of the lease writes below apply to it (§7.0).
+	//
+	// The field is "free" rather than "priced" so that **the zero value is the
+	// priced one**. Every reservation written before this existed was priced,
+	// and decoding those as free would skip the settlement that records their
+	// spend — under-reporting against a lease, which is the direction an
+	// overseer cannot correct. An older reader seeing no key gets false and
+	// keeps expecting a lease, which is the same safe reading from the other
+	// side.
+	//
+	// It is stored rather than inferred from a zero Amount: a quoted capability
+	// legitimately reserves before it knows the price, and reading that zero as
+	// "free" would let a priced order slip past the lease entirely.
+	Free bool `json:"free,omitempty"`
 	// AuthorizedBy is the higher principal that authorized this. It is recorded
 	// rather than merely checked, because "who authorized this spend" is the
 	// first question asked about an invoice nobody expected.
@@ -241,16 +256,25 @@ func Reserve(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, req Request, exec
 	if err != nil {
 		return Claim{}, err
 	}
-	if grant.Lease == nil {
-		return Claim{}, errors.New("effect: no lease is held for this capability; an effectful action spends from an exclusive allocation, never from a shared envelope")
-	}
-	lease := *grant.Lease
-	if lease.CellID != executingCell {
-		return Claim{}, fmt.Errorf("effect: %s cannot reserve against a lease held by %q; spend comes from the acting cell's own lease",
-			executingCell, lease.CellID)
-	}
-	if lease.Capability != req.Capability.ID {
-		return Claim{}, fmt.Errorf("effect: the lease is for %s but this action is %s", lease.Capability, req.Capability.ID)
+	// A capability with no cost model needs no lease (§7.0), and everything
+	// below that touches one is skipped for it. What is *not* skipped is the
+	// reservation itself: the key claim is rule 2 and the ref CAS is what makes
+	// "exactly one effect" true, and neither has anything to do with money. A
+	// light switch is as irreversible as a board order.
+	free := !req.Capability.Priced()
+	var lease authority.Lease
+	if !free {
+		if grant.Lease == nil {
+			return Claim{}, errors.New("effect: no lease is held for this capability; an effectful action spends from an exclusive allocation, never from a shared envelope")
+		}
+		lease = *grant.Lease
+		if lease.CellID != executingCell {
+			return Claim{}, fmt.Errorf("effect: %s cannot reserve against a lease held by %q; spend comes from the acting cell's own lease",
+				executingCell, lease.CellID)
+		}
+		if lease.Capability != req.Capability.ID {
+			return Claim{}, fmt.Errorf("effect: the lease is for %s but this action is %s", lease.Capability, req.Capability.ID)
+		}
 	}
 
 	// Look first, so the common "already done" case reports what happened rather
@@ -272,9 +296,12 @@ func Reserve(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, req Request, exec
 	// envelope refuses the reservation here rather than at settlement — before
 	// the effect happens, which is the only point at which refusing helps
 	// (§9.12).
-	bounded, err := grant.Bounded()
-	if err != nil {
-		return Claim{}, err
+	var bounded *authority.Lease
+	if !free {
+		bounded, err = grant.Bounded()
+		if err != nil {
+			return Claim{}, err
+		}
 	}
 
 	// Hold the headroom first. If the key claim below then fails, the hold is
@@ -286,16 +313,19 @@ func Reserve(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, req Request, exec
 	// issued: storing the bounded lease would rewrite the record of what the
 	// overseer actually committed to, and that record is the evidence for every
 	// later question about this spend.
-	if _, err := bounded.Hold(req.Amount, req.Quantity); err != nil {
-		return Claim{}, err
-	}
-	held, err := lease.Hold(req.Amount, req.Quantity)
-	if err != nil {
-		return Claim{}, err
-	}
-	heldHash, err := authority.PublishLease(f, held, grant.LeaseHash)
-	if err != nil {
-		return Claim{}, err
+	held, heldHash := lease, grant.LeaseHash
+	if !free {
+		if _, err := bounded.Hold(req.Amount, req.Quantity); err != nil {
+			return Claim{}, err
+		}
+		held, err = lease.Hold(req.Amount, req.Quantity)
+		if err != nil {
+			return Claim{}, err
+		}
+		heldHash, err = authority.PublishLease(f, held, grant.LeaseHash)
+		if err != nil {
+			return Claim{}, err
+		}
 	}
 
 	var expires int64
@@ -309,17 +339,20 @@ func Reserve(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, req Request, exec
 	r := Reservation{
 		Key: key, CellID: executingCell, Task: req.Task,
 		Capability: req.Capability.ID, Interface: req.Capability.Interface,
-		Amount: req.Amount, Unit: req.Unit, Quantity: req.Quantity,
+		Amount: req.Amount, Unit: req.Unit, Quantity: req.Quantity, Free: free,
 		AuthorizedBy: req.AuthorizedBy,
 		State:        StateOffered, ReservedAt: at, ExpiresAt: expires,
 	}
 	hash, err := writeReservation(p, name, r, "")
 	if err != nil {
 		// The key was claimed between the read and the write. Give the hold
-		// back, because the winner has taken its own.
-		if back, rerr := held.Release(req.Amount, req.Quantity); rerr == nil {
-			if backHash, perr := authority.PublishLease(f, back, heldHash); perr == nil {
-				held, heldHash = back, backHash
+		// back, because the winner has taken its own. A free action took no
+		// hold, so there is nothing to give back.
+		if !free {
+			if back, rerr := held.Release(req.Amount, req.Quantity); rerr == nil {
+				if backHash, perr := authority.PublishLease(f, back, heldHash); perr == nil {
+					held, heldHash = back, backHash
+				}
 			}
 		}
 		if errors.Is(err, varvigcli.ErrCAS) {
@@ -350,7 +383,15 @@ func Settle(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, c Claim, externalR
 	if externalRef == "" {
 		return c, fmt.Errorf("effect: settling %s needs the external reference; a spend nobody can look up is not a settled one", short(c.Reservation.Key))
 	}
-	if c.Reservation.HoldReleased {
+	// The double-settle guard differs by path because the thing it protects
+	// differs. A priced reservation is guarded by its hold: releasing it twice
+	// would spend the lease twice. A free one has no hold, so what guards it is
+	// its own state plus the ref CAS below.
+	if c.Reservation.Free {
+		if c.Reservation.State == StateDone {
+			return c, fmt.Errorf("effect: %s is already settled", short(c.Reservation.Key))
+		}
+	} else if c.Reservation.HoldReleased {
 		return c, fmt.Errorf("effect: the hold for %s is already released; settling again would spend the lease twice", short(c.Reservation.Key))
 	}
 	if err := c.hasLease(); err != nil {
@@ -359,19 +400,22 @@ func Settle(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, c Claim, externalR
 	if actual == 0 {
 		actual = c.Reservation.Amount
 	}
-	lease, err := c.Lease.Convert(c.Reservation.Amount, actual, c.Reservation.Quantity, c.Reservation.Quantity)
-	if err != nil {
-		return c, err
+	if !c.Reservation.Free {
+		lease, err := c.Lease.Convert(c.Reservation.Amount, actual, c.Reservation.Quantity, c.Reservation.Quantity)
+		if err != nil {
+			return c, err
+		}
+		// The lease first, in the factory repo: a crash after this and before
+		// the reservation write over-reports spend, which an overseer can
+		// correct. The reverse order would let a reservation say an irreversible
+		// action was paid for against a lease with no record of paying, which
+		// nobody can.
+		leaseHash, err := authority.PublishLease(f, lease, c.LeaseHash)
+		if err != nil {
+			return c, err
+		}
+		c.Lease, c.LeaseHash = lease, leaseHash
 	}
-	// The lease first, in the factory repo: a crash after this and before the
-	// reservation write over-reports spend, which an overseer can correct. The
-	// reverse order would let a reservation say an irreversible action was paid
-	// for against a lease with no record of paying, which nobody can.
-	leaseHash, err := authority.PublishLease(f, lease, c.LeaseHash)
-	if err != nil {
-		return c, err
-	}
-	c.Lease, c.LeaseHash = lease, leaseHash
 
 	r := c.Reservation
 	r.State, r.ExternalRef, r.SettledAt, r.HoldReleased = StateDone, externalRef, at, true
@@ -405,7 +449,7 @@ func Fail(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, c Claim, reason stri
 		return c, err
 	}
 	r.State, r.Detail, r.SettledAt = StateFailed, reason, at
-	if !r.HoldReleased {
+	if !r.Free && !r.HoldReleased {
 		lease, err := c.Lease.Release(r.Amount, r.Quantity)
 		if err != nil {
 			return c, err
@@ -438,7 +482,18 @@ func Resolve(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, c Claim, happened
 	if principal == r.CellID {
 		return c, fmt.Errorf("%w: %s cannot resolve its own pending reservation", ErrSelfAuthorization, r.CellID)
 	}
-	if happened {
+	// A free capability has no lease, so resolving it moves the record and
+	// nothing else. The outcome still matters — it is the difference between an
+	// arm that moved and one that did not — which is why the state is written
+	// either way (§7.0).
+	switch {
+	case r.Free:
+		if happened {
+			r.State = StateDone
+		} else {
+			r.State = StateFailed
+		}
+	case happened:
 		// It happened: the lease owes the money. If the hold was already
 		// released by an expiry, the spend is applied without a hold to convert
 		// — which is exactly the case expiry-without-release-of-the-key exists
@@ -461,7 +516,7 @@ func Resolve(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, c Claim, happened
 		}
 		c.Lease, c.LeaseHash = lease, leaseHash
 		r.State, r.HoldReleased = StateDone, true
-	} else {
+	default:
 		if !r.HoldReleased {
 			lease, err := c.Lease.Release(r.Amount, r.Quantity)
 			if err != nil {
@@ -515,7 +570,10 @@ func ReleaseExpired(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, lease auth
 	}
 	var released []Reservation
 	for _, r := range open {
-		if r.Capability != lease.Capability || !r.Expired(now) {
+		// A free reservation holds no headroom, so there is nothing for an
+		// expiry to give back. Its key stays claimed for good either way —
+		// that invariant is about the effect, not the money.
+		if r.Free || r.Capability != lease.Capability || !r.Expired(now) {
 			continue
 		}
 		next, err := lease.Release(r.Amount, r.Quantity)
@@ -714,6 +772,11 @@ func openReservations(p varvigcli.ProjectRepo, cellID string) ([]Reservation, er
 // cell called "/", which says nothing about what actually went wrong. This
 // turns a confusing arithmetic failure into the plumbing bug it is.
 func (c Claim) hasLease() error {
+	if c.Reservation.Free {
+		// Nothing to check: a capability with no cost model never had a lease,
+		// so an absent one here is the correct state rather than a lost handle.
+		return nil
+	}
 	if c.Lease.CellID == "" {
 		return fmt.Errorf("effect: settling %s has no lease attached; the claim lost it between taking and settling",
 			short(c.Reservation.Key))
@@ -723,4 +786,65 @@ func (c Claim) hasLease() error {
 			short(c.Reservation.Key), c.Lease.CellID, c.Reservation.CellID)
 	}
 	return nil
+}
+
+// ActionsToday counts a cell's effectful actions against one capability in the
+// trailing day, for the rate ceiling of §6.7 rule 4.
+//
+// It is measured from reservation refs because that is where the truth is: the
+// reservation is created before the effect is attempted and its key is never
+// released, so a rate derived from it cannot undercount actions that happened.
+//
+// Which states count is the whole of the judgement:
+//
+//	offered   no — nothing took it, so nothing happened
+//	pending   yes — taken, outcome unknown, so it may have happened
+//	reported  yes — an executor says it happened
+//	done      yes — confirmed
+//	failed    no — a definite rejection, so no effect occurred
+//
+// Pending counts because a rate ceiling exists to bound how much a cell can
+// *do*, and an action whose outcome nobody learned is one that may well have
+// been done. Counting it can refuse a print that would have been allowed; not
+// counting it can allow a print that should have been refused. Only one of
+// those two errors is corrected by asking a person.
+func ActionsToday(p varvigcli.ProjectRepo, cellID, capability string, now int64) (int64, error) {
+	return actionsSince(p, cellID, capability, now-86400)
+}
+
+func actionsSince(p varvigcli.ProjectRepo, cellID, capability string, since int64) (int64, error) {
+	if err := cell.CheckID(cellID); err != nil {
+		return 0, err
+	}
+	refs, err := p.Refs()
+	if err != nil {
+		return 0, err
+	}
+	prefix := cell.ReservationPrefix + cellID + "/"
+	var n int64
+	var bad []string
+	for _, ref := range refs {
+		if !strings.HasPrefix(ref.Name, prefix) || len(ref.Name) <= len(prefix) {
+			continue
+		}
+		r, _, err := loadReservation(p, ref.Name)
+		if err != nil {
+			// Reported rather than skipped, and the count is returned alongside
+			// the error: an unreadable reservation might be an action inside the
+			// window, so a caller must not read a short count as a low rate.
+			bad = append(bad, fmt.Sprintf("%s: %v", ref.Name, err))
+			continue
+		}
+		if r.Capability != capability || r.ReservedAt < since {
+			continue
+		}
+		switch r.State {
+		case StatePending, StateReported, StateDone:
+			n++
+		}
+	}
+	if len(bad) > 0 {
+		return n, fmt.Errorf("effect: %d unreadable reservation refs, each possibly an action inside the rate window: %v", len(bad), bad)
+	}
+	return n, nil
 }

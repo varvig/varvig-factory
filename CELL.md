@@ -1,6 +1,6 @@
 # The Cell Contract
 
-*Normative. Version 6* — adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
+*Normative. Version 7* — makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
 effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
@@ -469,9 +469,55 @@ stays empty rather than an error anybody sees.
 
 ## 8. Budget
 
-A cell declares a spend cap and halts when it is exceeded. This is not optional:
-attempts multiply cost, and a disconnected cell claiming speculatively can burn
-budget on work that proves duplicative (§7).
+### 8.0 Budget is optional, and absent means unenforced
+
+**A factory with no budgets configured must simply work.** Absence of a cap
+means *no enforcement*, never *zero budget* — and the difference is not
+academic, because this contract used to have it backwards. An unset
+`inference_daily` read as a cap of zero, so the ledger refused every spend and
+claim policy skipped every ticket citing budget: a factory nobody had
+configured did nothing and reported being out of money.
+
+Most of what a cell does costs nothing external — builds, tests, verification,
+sync, local inference on hardware already paid for — so an unconfigured budget
+is the ordinary case for a factory that spends nothing, not an edge case being
+tolerated.
+
+**Leases gate spend, not action:**
+
+| Capability declares | Requires |
+|---|---|
+| No cost model | **Nothing.** Runs freely. |
+| A cost model (`fixed` or `quoted`) | A lease with headroom |
+
+One guard keeps that honest, and it has to arrive in the same change as the
+permission or the permission is a hole: **a capability that incurs cost must
+declare a cost model.** An action that reports a cost against a capability
+declaring none is refused as *malformed*, not run unmetered. Omitting the cost
+model must never be the cheapest way to spend money unwatched.
+
+**`effectful` and `costs money` are orthogonal.** Effectful means
+*irreversible*. Turning on a light, moving an arm, printing with filament
+already paid for, posting a message: all irreversible, all free. Such a
+capability declares `effectful`, no cost model, and needs no lease — and still
+obeys every §6.7 rule, because every one of those rules exists because of
+irreversibility rather than because of cost.
+
+Where a free effect still needs bounding, the envelope's **quantity and rate**
+ceilings do it, with no currency invented for the purpose. For a free
+capability those are the *only* bound there is, which is why they had to start
+being enforced for this to be safe rather than merely permissive. A rate
+ceiling is measured from reservation refs; an unmeasured history refuses rather
+than passing, because an unmeasured history is not an empty one.
+
+Where nothing is configured, nothing is bounded.
+
+#### Where a budget *is* configured
+
+A cell declares a spend cap and halts when it is exceeded. Where one is set it
+is enforced strictly: attempts multiply cost, and a disconnected cell claiming
+speculatively can burn budget on work that proves duplicative (§7). Making
+absence permissive must not make presence permissive.
 
 ```json
 {
@@ -598,7 +644,8 @@ is a write:
 |---|---|
 | Propose | Allowed. Append-only bounds the damage: a revoked principal that has not heard yet wastes compute. |
 | Promote | **Refused.** It moves a ref, and a shared ceiling cannot be enforced locally. |
-| Effectful | Allowed **within an outstanding lease**, offline, indefinitely. Refused with no lease. |
+| Effectful, priced | Allowed **within an outstanding lease**, offline, indefinitely. Refused with no lease. |
+| Effectful, free | Allowed with no lease at all; bounded only by the envelope's quantity and rate ceilings (§8.0). |
 
 Freshness is Factory's to enforce, not varvig's, and not by choice: varvig's
 ref-update verification checks a signer against the trust file *as the verifying
@@ -638,17 +685,37 @@ refusals:
    rights move refs; they are not a licence to spend money, and conflating the
    two turns a scoped repository credential into a purchasing credential. The
    higher principal need not be human: an overseer agent satisfies this fully.
-4. **Bounded by the envelope, spent from the acting cell's own lease.** Another
-   cell's lease is not spendable here, however much headroom it has.
-5. **Never auto-retried, never regenerated.** A failed effectful action
+4. **Bounded by the envelope** — spend, quantity *and* rate. This applies to
+   every effectful action, including one that costs nothing, and for a free
+   capability it is the only bound there is. All three dimensions matter
+   because they fail differently: a spend cap stops one expensive mistake, a
+   quantity cap stops a units-confusion mistake, and a rate cap stops a loop
+   that is individually within both and runs all night.
+5. **Spent from the acting cell's own lease — if the capability declares a cost
+   model.** Another cell's lease is not spendable here, however much headroom
+   it has. A capability declaring no cost model needs no lease at all (§8.0),
+   and every rule above still applies to it: they exist because the action is
+   irreversible, not because it is expensive.
+6. **Never auto-retried, never regenerated.** A failed effectful action
    escalates; retry is an authorized decision, not a loop behaviour. A
    conflicting effectful attempt does not re-run, because the external world has
    already moved.
+7. **Never inside anything that retries.** A cell runs its executor outside any
+   transaction, so a ref-contention retry cannot re-place an order. Today this
+   holds trivially — nothing here constructs a transaction at all — and it is
+   written down so it keeps holding when a landing surface exists.
 
 #### How a ticket asks for one
 
 A ticket names an effectful capability in the same directive that carries build
-and test requirements, with the parameters on a line of their own:
+and test requirements, with the parameters on a line of their own.
+
+**A ticket supplies the identity; the cell's configuration supplies the terms.**
+The interface hash and the cost model come from the cell's own capabilities
+object, never from the request. That direction is load-bearing: reading the cost
+model off the ticket would let a ticket declare a priced capability free and
+walk straight past the lease check, so what a ticket can ask for is *what* to
+do and never *what it costs*.
 
 ```
 factory-requires: effect=pcb-fabrication@1 interface=1220a1b2…
@@ -932,6 +999,17 @@ rationale.
     repositories and cannot be atomic; a record saying an irreversible action
     was paid for against a lease with no record of paying is the one state here
     that nobody can undo.
+16. **No unset budget read as a zero budget** (§8.0). Absence of a cap means no
+    enforcement. Reading it as a ceiling of zero makes a factory nobody
+    configured refuse to work and report being out of money, which looks like
+    caution and is a fault.
+17. **No cost taken on a capability that declares no cost model** (§8.0). The
+    action is refused as malformed rather than run unmetered, because the moment
+    "no cost model" means "no lease needed", omitting it becomes the cheapest
+    way to spend money with nothing watching.
+18. **No cost model read off a request** (§8.2). A ticket names what to do; an
+    operator's configuration says what doing it costs. The other direction lets
+    a ticket declare a board order free.
 
 ---
 

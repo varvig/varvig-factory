@@ -81,7 +81,7 @@ func effectCell(t *testing.T, amount cell.Money) (*Cell, *varvigcli.Fake, *effec
 	c := &Cell{
 		Capabilities: cell.Capabilities{
 			CellID:  "mini-a",
-			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: ifaceHash}},
+			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: ifaceHash, CostModel: cell.CostFixed}},
 		},
 		Factory:            fr,
 		Project:            pr,
@@ -491,5 +491,159 @@ func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
 		if e.ExternalRef == "PO-77" {
 			t.Fatalf("a settled report was settled again: %+v", e)
 		}
+	}
+}
+
+// freeEffectCell is a cell wired for a free effectful capability: no cost
+// model, no lease, and — in the base case — no envelope either. It is the whole
+// of what §7.0 says a factory that spends nothing should need.
+func freeEffectCell(t *testing.T, overseer string, ceilings []authority.Ceiling) (*Cell, *varvigcli.Fake, *effect.Fake) {
+	t.Helper()
+	v := varvigcli.NewFake("mini-a")
+	fr, pr := varvigcli.Collapsed(v)
+	hash, err := iface.Publish(fr, "light-switch@1", map[string]any{"on": "boolean"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := fmt.Sprintf("Turn it on.\nfactory-requires: effect=light-switch@1 interface=%s\nfactory-effect: {\"on\":true}", hash)
+	v.AddTicket(effTicket, spec, varvigcli.Scope{Reads: []string{"hardware"}, Writes: []string{"hardware"}}, "approved")
+
+	if overseer != "" {
+		env := authority.Envelope{Overseer: overseer, SetAt: effClock.Unix(), Ceilings: ceilings}
+		if _, err := authority.PublishEnvelope(fr, env, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The executor quotes zero, which is what a free capability costs.
+	capability := effect.Capability{ID: "light-switch@1", Interface: hash, Effectful: true}
+	fake := effect.NewFake(capability, 0, "")
+	ledger, err := budget.NewLedger(budget.Budget{}, "", effClock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &Cell{
+		Capabilities: cell.Capabilities{
+			CellID: "mini-a",
+			// No cost model: this is the declaration that the action is free.
+			Effects: []cell.EffectCapability{{ID: "light-switch@1", Interface: hash}},
+		},
+		Factory:            fr,
+		Project:            pr,
+		Ledger:             ledger,
+		Executors:          effect.Executors{fake},
+		EffectAuthorizedBy: "overseer-a",
+		EffectOverseer:     overseer,
+		EffectTTL:          3600,
+		Now:                func() time.Time { return effClock },
+		Log:                func(string) {},
+	}
+	return c, v, fake
+}
+
+func TestAFreeEffectNeedsNoLeaseOrOverseer(t *testing.T) {
+	// §7.0 through the loop rather than through effect.Check: no envelope, no
+	// lease, no overseer, and the arm still moves. Before this, effectGrants
+	// dropped any capability without a lease, so the whole class was
+	// unreachable no matter what Check would have said.
+	c, v, fake := freeEffectCell(t, "", nil)
+
+	if grants := c.effectGrants(); len(grants) != 1 {
+		t.Fatalf("a free capability with an executor and no lease reported %d grants, want 1", len(grants))
+	}
+	res, err := c.performEffect(context.Background(), effectTicket(t, v))
+	if err != nil {
+		t.Fatalf("performing the free effect: %v", err)
+	}
+	if !res.Done {
+		t.Fatalf("the free effect did not happen: %+v", res)
+	}
+	if fake.Count() != 1 {
+		t.Fatalf("the executor ran %d times, want 1", fake.Count())
+	}
+
+	// The reservation exists and records that it is free, so nothing downstream
+	// goes looking for a lease to settle against.
+	pending, err := effect.Pending(varvigcli.ProjectRepo{Varvig: v}, "mini-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("a settled free action left %d unresolved reservations", len(pending))
+	}
+
+	// And it is still exactly once: the second pass re-reads the key and
+	// declines rather than moving the arm again.
+	res2, err := c.performEffect(context.Background(), effectTicket(t, v))
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if fake.Count() != 1 {
+		t.Fatalf("the second pass moved the arm again: %d calls (%+v)", fake.Count(), res2)
+	}
+}
+
+func TestAFreeEffectIsStillBoundedByQuantityAndRate(t *testing.T) {
+	// §9.26 through the loop, which is where the history is actually measured
+	// from reservation refs rather than passed in by a test.
+	c, v, fake := freeEffectCell(t, "overseer-a", []authority.Ceiling{
+		{Capability: "light-switch@1", RatePerDay: 1},
+	})
+
+	if res, err := c.performEffect(context.Background(), effectTicket(t, v)); err != nil || !res.Done {
+		t.Fatalf("the first action of the day was refused: %+v (err %v)", res, err)
+	}
+	if fake.Count() != 1 {
+		t.Fatalf("executor ran %d times, want 1", fake.Count())
+	}
+
+	// A different task, so the idempotency key differs and it is the rate — not
+	// the key — that has to do the refusing.
+	second := effectTicket(t, v)
+	second.ID = "c3feed000000000000000000000000000000000000000000000000000000000a"
+	res, err := c.performEffect(context.Background(), second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Done {
+		t.Fatal("a second action passed a ceiling of one per day")
+	}
+	if fake.Count() != 1 {
+		t.Fatalf("the refused action still ran: %d calls", fake.Count())
+	}
+	if !strings.Contains(res.Reason, "per day") {
+		t.Fatalf("the refusal does not name the rate ceiling: %q", res.Reason)
+	}
+}
+
+func TestATicketCannotMakeAPricedCapabilityFree(t *testing.T) {
+	// The direction that matters. A ticket names what it wants done; the cell's
+	// configuration says what doing it costs. If the cost model were read off
+	// the request, a ticket could declare a board order free and walk straight
+	// past the lease check — so the loop takes the terms from configuration and
+	// only the identity from the ticket.
+	c, v, _ := effectCell(t, 100000)
+	// Strip the cell's lease, so the only thing that could permit this order is
+	// a (wrong) reading of the capability as free.
+	leaseRef, err := cell.LeaseRef("mini-a", "pcb-fabrication@1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, err := c.Factory.ResolveRef(leaseRef)
+	if err != nil {
+		t.Fatalf("the fixture has no lease to remove: %v", err)
+	}
+	if err := c.Factory.DeleteRef(leaseRef, current); err != nil {
+		t.Fatal(err)
+	}
+	res, err := c.performEffect(context.Background(), effectTicket(t, v))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Done {
+		t.Fatal("a priced capability was ordered with no lease")
+	}
+	if !strings.Contains(res.Reason, "lease") {
+		t.Fatalf("the refusal is not about the missing lease: %q", res.Reason)
 	}
 }

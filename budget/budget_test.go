@@ -105,16 +105,45 @@ func TestValidateRejectsAnUnpriceableBudget(t *testing.T) {
 	}
 }
 
-func TestNoInferenceBudgetRefusesByName(t *testing.T) {
-	// A Micro cell with roles verify+build has no inference budget, and an
-	// attempt attempted anyway must fail with a reason an operator can act on.
-	l, err := NewLedger(Budget{StorageGB: 10}, "", day0)
+func TestAnUnconfiguredBudgetIsUnenforcedNotZero(t *testing.T) {
+	// §7.0, and this test used to assert the opposite. An unset inference cap
+	// meant "no inference budget declared" and refused every spend, which made
+	// a factory that had configured nothing refuse to attempt anything —
+	// broken rather than safe. Absence means no enforcement.
+	//
+	// Both an entirely empty budget and one that configures unrelated things
+	// have to pass, because "I set a storage cap" is not a statement about
+	// inference.
+	for _, b := range []Budget{{}, {StorageGB: 10}} {
+		l, err := NewLedger(b, "", day0)
+		if err != nil {
+			t.Fatalf("budget %+v was rejected: %v", b, err)
+		}
+		if d := l.CanSpend(day0, false); !d.OK {
+			t.Fatalf("budget %+v: online spend refused as %q; unconfigured means unenforced", b, d.Reason)
+		}
+		// Offline too: the offline cap is a fraction of the daily one, and a
+		// fraction of unlimited is unlimited, not zero.
+		if d := l.CanSpend(day0, true); !d.OK {
+			t.Fatalf("budget %+v: offline spend refused as %q", b, d.Reason)
+		}
+	}
+}
+
+func TestAConfiguredCapStillHalts(t *testing.T) {
+	// The other half of the pair: making absence permissive must not make
+	// presence permissive. A cell that set a cap still stops at it.
+	l, err := NewLedger(Budget{InferenceDaily: 1000, PerCallCost: 600}, "", day0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := l.CanSpend(day0, false)
-	if d.OK || d.Reason != ReasonNoInference {
-		t.Fatalf("decision = %+v, want a %q refusal", d, ReasonNoInference)
+	if d := l.CanSpend(day0, false); !d.OK {
+		t.Fatalf("first spend refused: %+v", d)
+	}
+	l.Spend(day0, false, 0, 0)
+	l.Spend(day0, false, 0, 0)
+	if d := l.CanSpend(day0, false); d.OK || d.Reason != ReasonInferenceDaily {
+		t.Fatalf("decision after exceeding the cap = %+v, want a %q refusal", d, ReasonInferenceDaily)
 	}
 }
 

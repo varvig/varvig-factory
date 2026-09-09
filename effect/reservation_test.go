@@ -578,7 +578,7 @@ func Test12_EnvelopeTightening(t *testing.T) {
 
 	// The 320 EUR order that was fine a moment ago is now refused — before it
 	// happens, which is the only point at which refusing helps.
-	d := Check(order(t, c), "mini-a", tightened, online, clock, 0)
+	d := Check(order(t, c), "mini-a", tightened, online, clock, 0, measured)
 	if d.Allowed {
 		t.Fatal("an order above the tightened ceiling was allowed")
 	}
@@ -611,7 +611,7 @@ func Test12_EnvelopeTightening(t *testing.T) {
 	// check here would take that back — so a tighter ceiling is honoured from a
 	// three-day-old view, because adopting it can only reduce spend.
 	offline := authority.Sync{Configured: true, Reachable: false, At: at.Add(-72 * time.Hour)}
-	if d := Check(order(t, c), "mini-a", tightened, offline, clock, 0); d.Allowed {
+	if d := Check(order(t, c), "mini-a", tightened, offline, clock, 0, measured); d.Allowed {
 		t.Fatal("a disconnected cell ignored a tightened envelope")
 	}
 
@@ -676,7 +676,7 @@ func Test12c_RemovingACapabilityIsTheSharpestTightening(t *testing.T) {
 	if _, err := revoked.Bounded(); err == nil {
 		t.Fatal("a lease for a capability the envelope no longer bounds was allowed")
 	}
-	d := Check(order(t, c), "mini-a", revoked, online, clock, 0)
+	d := Check(order(t, c), "mini-a", revoked, online, clock, 0, measured)
 	if d.Allowed {
 		t.Fatal("an order under a revoked capability was allowed")
 	}

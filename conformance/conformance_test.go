@@ -1063,3 +1063,86 @@ func Test09_NoSecondScheduler(t *testing.T) {
 // jsonUnmarshal is encoding/json's Unmarshal, wrapped so the helpers above read
 // without an import that only they use.
 func jsonUnmarshal(b []byte, v any) error { return json.Unmarshal(b, v) }
+
+// Test23_NoBudgetFactory is §9.23: with no envelope, no lease and no overseer
+// configured, a factory completes a full ticket lifecycle — claim, attempt,
+// verify, promote — and nothing stalls waiting for budget.
+//
+// This is the vector that would have caught the inversion §7.0 exists to
+// forbid. An unset inference cap used to read as a zero one, so the ledger
+// refused every spend and the claim policy skipped every ticket with
+// SkipBudget: a factory that had configured nothing did nothing, and said it
+// was out of budget. Absence of a budget means no enforcement, never zero.
+//
+// Most of what a factory does costs nothing external — builds, tests,
+// verification, sync, local inference on hardware already paid for — so this is
+// not an edge case being tolerated, it is the ordinary case for a factory that
+// spends no money.
+func Test23_NoBudgetFactory(t *testing.T) {
+	ctx := context.Background()
+	o := defaultOpts("mini-a")
+	// Nothing configured. Not a small budget — none.
+	o.budget = budget.Budget{}
+	// A promote grant is still required: §7.0 makes *budgets* optional, and
+	// nothing about it relaxes authority. That is the pairing worth asserting —
+	// removing the money did not remove the trust check.
+	o.fingerprint = "SHA256:nobudget"
+	o.baselines = map[string]cell.Environment{
+		"src/": {Platform: "linux/amd64", Toolchains: map[string]string{"go": "1.24.7"}},
+	}
+	h := newHarness(t, o)
+	h.allowGate()
+	h.recordAgreement("src/", 25)
+
+	// Claim and attempt.
+	rep, err := h.Cell.Once(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := rep.Skipped[claim.SkipBudget]; got != 0 {
+		t.Fatalf("a factory with no budget configured skipped %d ticket(s) for budget; absence means unenforced:\n%s", got, h.logText())
+	}
+	if len(rep.Attempts) != 1 {
+		t.Fatalf("made %d attempts with no budget configured, want 1:\n%s", len(rep.Attempts), h.logText())
+	}
+	if h.Model.Calls == 0 {
+		t.Fatal("the model was never called, so nothing was actually attempted")
+	}
+	att := rep.Attempts[0]
+
+	// Verify — by another cell, so the evidence is independent and the
+	// promotion below is the real §6.3 path rather than a relaxed one.
+	peerEvidence(t, h.V, "micro-b", att.Task, att.Change, att.Environment)
+	if err := h.V.SpecScore(taskID, att.Change, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	// Promote.
+	req := promote.Request{
+		Attempt:      cell.Attempt{CellID: "mini-a", Task: taskID, N: 1, Change: att.Change, Environment: att.Environment, CreatedAt: now.Unix() - 10},
+		Scope:        "src/",
+		Ticket:       taskID,
+		TicketObject: taskObj,
+		Ref:          "refs/heads/main",
+		Baseline:     baselinePtr(o.baselines["src/"]),
+	}
+	req.Evidence, req.Environments = loadEvidence(t, h.V, att.Change)
+	if err := h.Sw.SetMode(promote.ModeAutonomous); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Sw.EnableAutonomous("src/"); err != nil {
+		t.Fatal(err)
+	}
+	out, err := h.Cell.Promoter.Promote(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.Promoted {
+		t.Fatalf("promotion refused in a factory with no budget: %s", out.Summary())
+	}
+
+	// And the ledger did not quietly become a cap of zero on the way through.
+	if d := h.Ledger.CanSpend(now, false); !d.OK {
+		t.Fatalf("the unconfigured ledger refuses spend as %q", d.Reason)
+	}
+}

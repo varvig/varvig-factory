@@ -352,7 +352,14 @@ func run() error {
 		AuthorizedBy: "overseer-a",
 	}
 	grant := authority.Grant{Envelope: envelope, Lease: &lease}
-	dec := effect.Check(order, "mini-a", grant, disconnected.Sync, func() time.Time { return clock }, 0)
+	// The envelope caps this capability at four orders a day, and a rate ceiling
+	// is measured rather than derived: the count comes from reservation refs,
+	// which is the only record that exists before an effect is attempted.
+	taken := func() authority.History {
+		n := must1(effect.ActionsToday(mini.project, "mini-a", "pcb-fabrication@1", clock.Unix()))
+		return authority.History{ActionsToday: n, Measured: true}
+	}
+	dec := effect.Check(order, "mini-a", grant, disconnected.Sync, func() time.Time { return clock }, 0, taken())
 	fmt.Printf("  offline order of 320 EUR inside a 1000 EUR lease: allowed=%v key=%s…\n", dec.Allowed, dec.Key[:12])
 
 	// The same intent, retried after the response was lost. Note the payload is
@@ -360,7 +367,7 @@ func run() error {
 	// the action *is*, so this is one order, not two.
 	retry := order
 	retry.Payload = map[string]any{"quantity": 5, "gerber": short(third.Change)}
-	again := effect.Check(retry, "mini-a", grant, disconnected.Sync, func() time.Time { return clock }, 0)
+	again := effect.Check(retry, "mini-a", grant, disconnected.Sync, func() time.Time { return clock }, 0, taken())
 	fmt.Printf("  the retry after a lost response derives the same key: %v\n", again.Key == dec.Key)
 
 	// Reserve, execute, settle. The key is claimed in a ref before the effect is
@@ -429,7 +436,7 @@ func run() error {
 	tooBig.Amount, tooBig.Quantity = 90000, 12
 	lease = claim.Lease
 	beyond := effect.Check(tooBig, "mini-a", authority.Grant{Envelope: envelope, Lease: &lease},
-		disconnected.Sync, func() time.Time { return clock }, 0)
+		disconnected.Sync, func() time.Time { return clock }, 0, taken())
 	fmt.Printf("  a 900 EUR order with %s EUR spendable: allowed=%v escalate=%v\n", bounded.Headroom(), beyond.Allowed, beyond.Escalate)
 	fmt.Println(indent(beyond.Error()))
 
@@ -440,7 +447,7 @@ func run() error {
 	// Checked against the pre-tightening envelope so this beat shows one rule
 	// failing, not two: the point here is the principal, not the ceiling.
 	self := effect.Check(itself, "mini-a", authority.Grant{Envelope: loosened, Lease: &lease},
-		disconnected.Sync, func() time.Time { return clock }, 0)
+		disconnected.Sync, func() time.Time { return clock }, 0, taken())
 	fmt.Printf("  mini-a authorizing its own order, promote key in hand: allowed=%v escalate=%v\n", self.Allowed, self.Escalate)
 	fmt.Println(indent(self.Error()))
 
@@ -470,7 +477,7 @@ func run() error {
 
 	// Note which cell this is: micro-b, the CPU-local verify/build cell with no
 	// model at all. Authority to spend is a lease, not a GPU.
-	micro.cell.Capabilities.Effects = []cell.EffectCapability{{ID: boards.ID, Interface: boards.Interface}}
+	micro.cell.Capabilities.Effects = []cell.EffectCapability{{ID: boards.ID, Interface: boards.Interface, CostModel: boards.CostModel}}
 	micro.cell.Executors = effect.Executors{fab}
 	micro.cell.EffectAuthorizedBy = "overseer-a"
 	micro.cell.EffectTTL = 3600
