@@ -21,6 +21,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/varvig/varvig-factory/cell"
 )
 
 // Budget is a cell's declared caps (CELL.md §8).
@@ -34,7 +36,7 @@ type Budget struct {
 	// inference is permitted at all, which is the correct default for a cell
 	// with no model: a verify/build cell should not have an inference budget it
 	// could only spend by being misconfigured.
-	InferenceDaily float64 `json:"inference_daily"`
+	InferenceDaily cell.Money `json:"inference_daily_minor"`
 	// VerifyConcurrent caps simultaneous verification jobs.
 	VerifyConcurrent int `json:"verify_concurrent"`
 	// StorageGB caps the cell-local artifact store.
@@ -48,30 +50,40 @@ type Budget struct {
 	// without knowing whether the work is duplicative.
 	//
 	// Zero means "derive it": DefaultOfflineShare of the daily cap.
-	OfflineInferenceDaily float64 `json:"offline_inference_daily,omitempty"`
+	OfflineInferenceDaily cell.Money `json:"offline_inference_daily_minor,omitempty"`
 	// PerCallCost prices a call whose runtime reported no usage — a CLI
 	// runtime, typically. Without it such a call would be free in the ledger,
 	// and a cell driving a local binary would have no cap at all.
-	PerCallCost float64 `json:"per_call_cost,omitempty"`
+	PerCallCost cell.Money `json:"per_call_cost_minor,omitempty"`
 	// CostPerKTokenIn and CostPerKTokenOut price a call the runtime did report
 	// usage for.
-	CostPerKTokenIn  float64 `json:"cost_per_ktoken_in,omitempty"`
-	CostPerKTokenOut float64 `json:"cost_per_ktoken_out,omitempty"`
+	CostPerKTokenIn  cell.Money `json:"cost_per_ktoken_in_minor,omitempty"`
+	CostPerKTokenOut cell.Money `json:"cost_per_ktoken_out_minor,omitempty"`
 }
 
-// DefaultOfflineShare is the fraction of the daily cap available while
-// disconnected, when the operator has not set an explicit offline cap. A
-// quarter, because offline spend is the least informed spend a cell does: it
-// cannot see another cell's success, so it is the spend most likely to be
-// duplicative.
-const DefaultOfflineShare = 0.25
+// The fraction of the daily cap available while disconnected, when the operator
+// has not set an explicit offline cap. A quarter, because offline spend is the
+// least informed spend a cell does: it cannot see another cell's success, so it
+// is the spend most likely to be duplicative.
+//
+// It is a ratio of integers rather than 0.25 so the derived cap is computed
+// without leaving the integer domain — the point of counting in minor units is
+// that no amount takes a detour through a float on its way to a decision.
+const (
+	offlineShareNumerator   = 1
+	offlineShareDenominator = 4
+)
 
 // OfflineCap is the effective offline cap.
-func (b Budget) OfflineCap() float64 {
+func (b Budget) OfflineCap() cell.Money {
 	if b.OfflineInferenceDaily > 0 {
 		return min(b.OfflineInferenceDaily, b.InferenceDaily)
 	}
-	return b.InferenceDaily * DefaultOfflineShare
+	// Integer division truncates, so the derived cap lands at or below the
+	// share rather than above it. Rounding a *cap* up would hand out headroom
+	// nobody configured, which is the wrong direction for the tighter of the
+	// two limits.
+	return b.InferenceDaily * offlineShareNumerator / offlineShareDenominator
 }
 
 // Attempts is how many attempts to request, honouring a per-ticket override.
@@ -106,7 +118,7 @@ func (b Budget) Validate() error {
 		// A looser offline cap than the online one inverts the §7 rule. It is
 		// almost certainly a typo, and left in place it would make the least
 		// informed spend the least constrained.
-		return fmt.Errorf("budget: offline_inference_daily (%g) exceeds inference_daily (%g); offline spend is capped more tightly, not less",
+		return fmt.Errorf("budget: offline_inference_daily (%s) exceeds inference_daily (%s); offline spend is capped more tightly, not less",
 			b.OfflineInferenceDaily, b.InferenceDaily)
 	}
 	// A cell that can spend but cannot price what it spends has no cap. Catch
@@ -117,15 +129,34 @@ func (b Budget) Validate() error {
 	return nil
 }
 
+// perTokens prices n tokens at a per-thousand rate, rounding to the nearest
+// minor unit with ties away from zero.
+//
+// Rounding to nearest rather than up: this bounds regenerable spend, so
+// over-charging halts a cell early and under-charging lets it run slightly long,
+// and neither is irreversible. Consistently rounding up would compound across
+// thousands of small calls into a cap noticeably tighter than the one the
+// operator configured.
+func perTokens(n int, perK cell.Money) cell.Money {
+	if n <= 0 || perK == 0 {
+		return 0
+	}
+	num := int64(n) * int64(perK)
+	if num < 0 {
+		return cell.Money(-((-num + 500) / 1000))
+	}
+	return cell.Money((num + 500) / 1000)
+}
+
 // Price converts one inference call's reported usage into ledger units. A call
 // the runtime reported no usage for is priced at PerCallCost, which is why that
 // field exists: the alternative is a call that costs nothing and a cap that
 // therefore does nothing.
-func (b Budget) Price(tokensIn, tokensOut int) float64 {
+func (b Budget) Price(tokensIn, tokensOut int) cell.Money {
 	if tokensIn == 0 && tokensOut == 0 {
 		return b.PerCallCost
 	}
-	cost := float64(tokensIn)/1000*b.CostPerKTokenIn + float64(tokensOut)/1000*b.CostPerKTokenOut
+	cost := perTokens(tokensIn, b.CostPerKTokenIn) + perTokens(tokensOut, b.CostPerKTokenOut)
 	if cost == 0 {
 		// Usage was reported but no per-token price is configured. Falling back
 		// to the per-call price is better than charging zero: an
@@ -155,7 +186,7 @@ type Decision struct {
 	Reason Reason
 	// Spent and Cap are the numbers behind the decision, so a refusal can be
 	// reported rather than merely returned.
-	Spent, Cap float64
+	Spent, Cap cell.Money
 }
 
 // Error renders a refusal for a human. A halting cell must say so (§7).
@@ -164,7 +195,7 @@ func (d Decision) String() string {
 		return "ok"
 	}
 	if d.Cap > 0 {
-		return fmt.Sprintf("halted: %s (%.4g of %.4g spent)", d.Reason, d.Spent, d.Cap)
+		return fmt.Sprintf("halted: %s (%s of %s spent)", d.Reason, d.Spent, d.Cap)
 	}
 	return "halted: " + string(d.Reason)
 }
@@ -181,18 +212,18 @@ type Ledger struct {
 	// operator reasons about days, and a rolling window makes "how much is left
 	// today" unanswerable.
 	day            string
-	spent          float64
-	offlineSpent   float64
+	spent          cell.Money
+	offlineSpent   cell.Money
 	calls          int
 	verifyInFlight int
 }
 
 // state is the persisted form.
 type state struct {
-	Day          string  `json:"day"`
-	Spent        float64 `json:"spent"`
-	OfflineSpent float64 `json:"offline_spent"`
-	Calls        int     `json:"calls"`
+	Day          string     `json:"day"`
+	Spent        cell.Money `json:"spent_minor"`
+	OfflineSpent cell.Money `json:"offline_spent_minor"`
+	Calls        int        `json:"calls"`
 }
 
 // NewLedger opens or creates a ledger at path. An empty path keeps it in memory,
@@ -261,7 +292,7 @@ func (l *Ledger) CanSpend(now time.Time, offline bool) Decision {
 
 // Spend records a completed inference call. It returns the cost recorded, so a
 // caller can log what an attempt actually cost rather than what it estimated.
-func (l *Ledger) Spend(now time.Time, offline bool, tokensIn, tokensOut int) float64 {
+func (l *Ledger) Spend(now time.Time, offline bool, tokensIn, tokensOut int) cell.Money {
 	cost := l.budget.Price(tokensIn, tokensOut)
 	l.mu.Lock()
 	l.rollover(now)
@@ -281,11 +312,11 @@ func (l *Ledger) Spend(now time.Time, offline bool, tokensIn, tokensOut int) flo
 // Snapshot is the ledger's current state, for reporting.
 type Snapshot struct {
 	Day          string
-	Spent        float64
-	OfflineSpent float64
+	Spent        cell.Money
+	OfflineSpent cell.Money
 	Calls        int
-	Cap          float64
-	OfflineCap   float64
+	Cap          cell.Money
+	OfflineCap   cell.Money
 }
 
 // Snapshot returns the current totals.
@@ -315,7 +346,7 @@ func (l *Ledger) AcquireVerify() Decision {
 		limit = 1
 	}
 	if l.verifyInFlight >= limit {
-		return Decision{Reason: ReasonVerifySaturated, Spent: float64(l.verifyInFlight), Cap: float64(limit)}
+		return Decision{Reason: ReasonVerifySaturated, Spent: cell.Money(l.verifyInFlight), Cap: cell.Money(limit)}
 	}
 	l.verifyInFlight++
 	return Decision{OK: true}

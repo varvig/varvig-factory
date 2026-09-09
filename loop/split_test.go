@@ -24,12 +24,12 @@ import (
 // envelope and lease go to a coordination Fake, the ticket to a project Fake.
 func splitCell(t *testing.T, amount cell.Money) (*Cell, *varvigcli.Fake, *varvigcli.Fake, *effect.Fake) {
 	t.Helper()
-	iface := boardInterface(t)
 	coord, work := varvigcli.NewFake("coordination"), varvigcli.NewFake("project")
 	fr := varvigcli.FactoryRepo{Varvig: coord}
 	pr := varvigcli.ProjectRepo{Varvig: work}
+	ifaceHash := boardInterface(t, fr)
 
-	spec := fmt.Sprintf("Order the prototype run.\nfactory-requires: effect=pcb-fabrication@1 interface=%s\nfactory-effect: {\"gerber\":\"rev-c\",\"quantity\":5}", iface)
+	spec := fmt.Sprintf("Order the prototype run.\nfactory-requires: effect=pcb-fabrication@1 interface=%s\nfactory-effect: {\"gerber\":\"rev-c\",\"quantity\":5}", ifaceHash)
 	work.AddTicket(effTicket, spec, varvigcli.Scope{Reads: []string{"hardware"}, Writes: []string{"hardware"}}, "approved")
 
 	env := authority.Envelope{
@@ -47,10 +47,10 @@ func splitCell(t *testing.T, amount cell.Money) (*Cell, *varvigcli.Fake, *varvig
 		t.Fatal(err)
 	}
 
-	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: iface, Effectful: true}
+	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: ifaceHash, Effectful: true}
 	fake := effect.NewFake(capability, 32000, "EUR")
 	ledger, err := budget.NewLedger(
-		budget.Budget{InferenceDaily: 10, VerifyConcurrent: 1, StorageGB: 1, AttemptsDefault: 1, PerCallCost: 0.01},
+		budget.Budget{InferenceDaily: 1000, VerifyConcurrent: 1, StorageGB: 1, AttemptsDefault: 1, PerCallCost: 1},
 		filepath.Join(t.TempDir(), "ledger.json"), effClock)
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +58,7 @@ func splitCell(t *testing.T, amount cell.Money) (*Cell, *varvigcli.Fake, *varvig
 	c := &Cell{
 		Capabilities: cell.Capabilities{
 			CellID:  "mini-a",
-			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: iface}},
+			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: ifaceHash}},
 		},
 		Factory:            fr,
 		Project:            pr,

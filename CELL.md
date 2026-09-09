@@ -1,6 +1,6 @@
 # The Cell Contract
 
-*Normative. Version 5* — counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
+*Normative. Version 6* — adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
 effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
@@ -68,6 +68,7 @@ identity is the one thing that cannot be done afterwards.
 | `refs/factory/envelopes/<overseer-id>` | The spend ceilings one overseer set, shared across its cells (§8.1) |
 | `refs/factory/leases/<cell-id>/<capability>` | One exclusive allocation drawn from an envelope (§8.1) |
 | `refs/factory/reservations/<cell-id>/<idempotency-key>` | An effectful action's reservation, keyed by its derived idempotency key (§8.2) |
+| `refs/factory/interfaces/<hex alias>` | The interface registry: an alias pointing at the schema object whose id is the interface hash (§8.2) |
 | note namespace `factory/evidence` | Evidence for an attempt (§4) |
 | note namespace `factory/environment` | The environment descriptor an evidence record was produced in (§4.2) |
 | note namespace `factory/artifact` | *Legacy.* `artifact-ref` records, for a core without `tickets attach-artifact` (§7) |
@@ -955,16 +956,43 @@ push leases against the peer it is pushing to rather than whichever peer was
 fetched last (§7). Without the first, authority reached exactly one member of a
 set; without the second, only one member could accept a head push.
 
-**Interfaces are not yet varvig objects.** A capability reference already binds
-to the interface *hash* rather than the alias (§8.2), which is the part that
-matters for safety. What is missing is the registry the hash points into:
-interfaces published as objects, resolvable by hash, with the alias as a
-convenience over the top.
+**Interfaces are varvig objects.** A capability reference binds to the interface
+*hash*, and that hash is now the id of a stored schema object: publishing writes
+the canonical schema and the id that comes back *is* the hash. So a resolve is an
+ordinary blob read at the same id the capability names, and a registry cannot
+disagree with the hash it is keyed by.
 
-**Reputation is not derived.** Capability claims are advisory, and the design
-derives a cell's standing from its promotion history rather than from what it
-declares about itself. Today only the agreement-rate metric (§9) is derived, and
-it is per scope rather than per cell.
+`refs/factory/interfaces/<alias>` points at the schema so a person can type a
+name. Nothing in the effectful path reads the alias — re-pointing one changes
+what a human types and nothing about what a lease bounds or what an idempotency
+key covers, because the hash is in the key. The registry lives in the
+coordination replica (§2.1): what an interface requires is a fact about the
+factory, and a per-project registry would let two projects disagree about one
+hash's meaning while both looked correct.
+
+**An interface the registry does not hold is refused before the money.** A hash
+is enough to tell two interfaces apart, which is what matching needs, and not
+enough to say what an action requires. Acting on a hash nobody published means
+ordering a shape no one in the factory can describe.
+
+**Reputation is derived.** A cell's standing is: of the attempts it made at tasks
+that were later promoted, how many were the attempt that moved. Both halves come
+from state a cell cannot write on another's behalf — attempt refs are namespaced
+by cell id and immutable, and a promotion observation names the change that
+actually moved, so credit follows the change rather than whoever moved the ref.
+That matters in a flat factory, where the cell that promotes is usually not the
+cell that produced the work.
+
+Attempts at tasks nobody has promoted yet are excluded: unfinished is not failed.
+A cell with no record has no rate rather than a rate of zero, because "no record"
+and "a record of losing" are opposite answers and a newcomer reading as the worst
+possible cell is how a metric becomes a barrier to entry.
+
+**It is reported and never acted on.** Nothing in the loop reads it. A cell
+consulting reputation to decide whether to attempt would be ordering work by a
+quality judgement, which is varvig's job (§10.1) — and it would compound, since a
+cell that attempts less has less record. The number is for whoever can see the
+whole picture: an overseer sizing a lease, a human deciding what to keep running.
 
 **Money is counted in minor units.** Every amount is an integer of the named
 unit's minor units — `"amount_minor": 100000` is €1000.00 — and the keys say
@@ -983,15 +1011,21 @@ as a double release — reported as *"releasing 0.1 EUR ... which holds only
 case left 5.5e-17 reserved: a phantom hold that any "is anything outstanding"
 check reads as yes, permanently.
 
-Formatting and parsing assume the currency has two decimal places. That is right
-for EUR, USD and most others and wrong for JPY, which has none. Modelling the
-exponent per currency is a real thing to do and is deliberately not done here:
-it needs currency data this contract does not carry, and exact arithmetic is
-worth having without it. What it costs today is a display bug for such a
-currency, never a spend error — the stored integer is whatever was put in it.
+Rendering and parsing take the unit, because an amount is a count of minor units
+and does not know its own currency. ¥1000 prints as `1000` and €10.00 as `10.00`;
+parsing "1000" in JPY gives a thousand yen rather than ten. The exponents are
+ISO 4217's minor-unit column for the currencies that are *not* two — the
+exceptions, not the world, because a full table would be data this contract has
+no way to keep current and a stale one leaves a wrong answer that looks
+authoritative. Anything unlisted is assumed to have two, which is the common
+case and the safe reading of a unit nobody here has heard of.
 
-**Compute budget is still `float64`.** The budget in §8 bounds inference spend,
-which is regenerable: exceeding it wastes money and nothing else. It accumulates
-and drifts the same way, but no refusal there is irreversible and no hold has to
-round-trip, so it is left alone rather than converted for symmetry. The line
-between the two is the one §8.1 already draws.
+**The compute budget counts in minor units too.** It bounds regenerable spend, so
+no refusal there is irreversible — which was the argument for leaving it in
+`float64`, and is not an argument for keeping two arithmetics for money. Prices
+are computed per thousand tokens in integers, rounding to nearest with ties away
+from zero: over-charging halts a cell early and under-charging lets it run
+slightly long, and consistently rounding up would compound across thousands of
+small calls into a cap tighter than the one configured. The derived offline cap
+truncates rather than rounds, because rounding a *cap* up hands out headroom
+nobody set.

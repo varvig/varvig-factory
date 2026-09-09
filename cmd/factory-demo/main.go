@@ -522,7 +522,7 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 	seedTicket(v)
 	v.Upstream = upstream
 
-	b := budget.Budget{InferenceDaily: 100, PerCallCost: 1, VerifyConcurrent: 2, StorageGB: 10, AttemptsDefault: 1}
+	b := budget.Budget{InferenceDaily: 10000, PerCallCost: 100, VerifyConcurrent: 2, StorageGB: 10, AttemptsDefault: 1}
 	if inf.Tier == cell.TierNone {
 		// A verify/build cell holds no inference budget: it could only spend one
 		// by being misconfigured (CELL.md §8).
@@ -590,7 +590,7 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 // ledgerRefill gives a cell that has just taken the attempt role a budget to
 // attempt with — the demo's stand-in for an operator editing the config.
 func (d *demoCell) ledgerRefill() {
-	b := budget.Budget{InferenceDaily: 100, PerCallCost: 1, VerifyConcurrent: 2, StorageGB: 10, AttemptsDefault: 1}
+	b := budget.Budget{InferenceDaily: 10000, PerCallCost: 100, VerifyConcurrent: 2, StorageGB: 10, AttemptsDefault: 1}
 	ledger, err := budget.NewLedger(b, "", clock)
 	must(err)
 	d.ledger, d.cell.Ledger = ledger, ledger

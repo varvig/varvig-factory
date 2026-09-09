@@ -290,12 +290,14 @@ func relPath(root, path string) string {
 //
 // A reviewer will not catch the next `Amount float64`: it looks exactly like the
 // obvious way to write it, and the test that would fail is one nobody thought to
-// write. So the guard is structural — no field or method named for money may be
-// a float — and budget/ is exempt because it bounds regenerable spend, where no
-// refusal is irreversible and no hold round-trips (CELL.md §8 versus §8.1).
+// write. So the guard is structural: no field or method named for money may be
+// a float, anywhere.
 func TestNoFloatingPointMoney(t *testing.T) {
 	root := moduleRoot(t)
-	files := goFiles(t, root, "budget", "inference")
+	// Nothing is exempt any more. The inference budget was, on the argument that
+	// it bounds regenerable spend — true, and still no reason to keep a second
+	// arithmetic for money. One representation, one guard.
+	files := goFiles(t, root)
 
 	// Names that mean money here. Quantity, Ordered and the unit counts are
 	// deliberately absent: those are counts, and integers already.

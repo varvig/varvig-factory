@@ -60,7 +60,7 @@ type Response struct {
 	// Cost is the spend this call incurred in the ledger's unit, if the runtime
 	// can attribute it. Zero means "not attributable here" and the caller
 	// prices it from tokens instead.
-	Cost float64
+	Cost cell.Money
 }
 
 // Runtime is the model-runtime seam.

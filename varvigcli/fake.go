@@ -778,9 +778,22 @@ func (f *Fake) GC(reportExternal bool) (GCReport, error) {
 // varvig's pin refs, which reject anything that is not hex. A Fake that minted
 // Factory-labelled "sha256:…" ids would let a test pass against a ref name the
 // real varvig would refuse.
+// fakeHash returns a multihash-shaped object id, because that is the shape real
+// varvig returns and the Fake exists to model what varvig does.
+//
+// It was a bare hex digest, which no varvig ever produces. Nothing noticed until
+// something validated an id — the interface registry refuses a hash that is not
+// an object hash — and then every test failed against a Fake that had been
+// quietly wrong the whole time. A fake that models a value in a shape the real
+// thing never emits is a second implementation that differs, which is the one
+// thing this Fake's own contract says it must not be.
+//
+// The prefix is 0x12 0x20: sha2-256, thirty-two bytes. Honest, since that is
+// exactly the digest below — varvig's own default is blake3, but claiming a
+// blake3 code over a sha256 digest would be a different lie.
 func fakeHash(s string) string {
 	sum := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(sum[:])
+	return "1220" + hex.EncodeToString(sum[:])
 }
 
 func copyMap(in map[string]string) map[string]string {

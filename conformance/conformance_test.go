@@ -91,7 +91,7 @@ func defaultOpts(cellID string) opts {
 		roles:  []cell.Role{cell.RoleAttempt, cell.RoleBuild, cell.RoleVerify},
 		tier:   cell.TierLarge,
 		budget: budget.Budget{
-			InferenceDaily: 10, PerCallCost: 1,
+			InferenceDaily: 1000, PerCallCost: 100,
 			VerifyConcurrent: 2, StorageGB: 10, AttemptsDefault: 1,
 		},
 		reply: "--- src/a.go\npackage src\n\nfunc A() {}\n",
@@ -716,7 +716,7 @@ func Test06_BudgetHalt(t *testing.T) {
 	ctx := context.Background()
 	o := defaultOpts("mini-a")
 	// One unit of budget, one unit per call: the second pass must halt.
-	o.budget = budget.Budget{InferenceDaily: 1, PerCallCost: 1, VerifyConcurrent: 2, StorageGB: 10, AttemptsDefault: 1}
+	o.budget = budget.Budget{InferenceDaily: 100, PerCallCost: 100, VerifyConcurrent: 2, StorageGB: 10, AttemptsDefault: 1}
 	h := newHarness(t, o)
 	// Allow repeat attempts, so "already attempted" cannot be what stops the
 	// second pass. Budget must be the thing that does.

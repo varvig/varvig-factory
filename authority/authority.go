@@ -190,7 +190,7 @@ func (l Lease) Validate() error {
 	if l.Spent > l.Amount {
 		// Overspend is not a state to tolerate quietly: it means either a
 		// settlement bug or an action taken outside the lease.
-		return fmt.Errorf("authority: lease for %s/%s has spent %s of %s", l.CellID, l.Capability, l.Spent, l.Amount)
+		return fmt.Errorf("authority: lease for %s/%s has spent %s of %s %s", l.CellID, l.Capability, l.Spent.In(l.Unit), l.Amount.In(l.Unit), l.Unit)
 	}
 	if l.Ordered > l.Quantity && l.Quantity > 0 {
 		return fmt.Errorf("authority: lease for %s/%s has ordered %d of %d", l.CellID, l.Capability, l.Ordered, l.Quantity)
@@ -339,7 +339,7 @@ func Exposure(leases []Lease) map[string]cell.Money {
 // String renders a lease for an operator.
 func (l Lease) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "%s/%s: %s of %s %s", l.CellID, l.Capability, l.Spent, l.Amount, l.Unit)
+	fmt.Fprintf(&b, "%s/%s: %s of %s %s", l.CellID, l.Capability, l.Spent.In(l.Unit), l.Amount.In(l.Unit), l.Unit)
 	if l.Quantity > 0 {
 		fmt.Fprintf(&b, ", %d of %d units", l.Ordered, l.Quantity)
 	}

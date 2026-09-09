@@ -6,19 +6,21 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/varvig/varvig-factory/cell"
 )
 
 var day0 = time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 
-func priced(daily float64) Budget {
-	return Budget{InferenceDaily: daily, PerCallCost: 1, AttemptsDefault: 3, VerifyConcurrent: 2}
+func priced(daily cell.Money) Budget {
+	return Budget{InferenceDaily: daily, PerCallCost: 100, AttemptsDefault: 3, VerifyConcurrent: 2}
 }
 
 // TestBudgetHalts is FACTORY.md §9.6: the cell stops claiming at the cap. The
 // companion half — that it does not silently downgrade — is asserted in the loop
 // package, where a model choice exists to downgrade.
 func TestBudgetHalts(t *testing.T) {
-	l, err := NewLedger(priced(3), "", day0)
+	l, err := NewLedger(priced(300), "", day0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +47,7 @@ func TestOfflineCapIsTighterAndSeparate(t *testing.T) {
 	// §7: speculative claiming while offline is capped separately and more
 	// tightly, because a disconnected cell cannot check whether another cell
 	// already succeeded.
-	b := priced(10)
+	b := priced(1000)
 	b.OfflineInferenceDaily = 2
 	l, err := NewLedger(b, "", day0)
 	if err != nil {
@@ -67,12 +69,12 @@ func TestOfflineCapIsTighterAndSeparate(t *testing.T) {
 }
 
 func TestOfflineCapDefaultsToAShareOfTheDailyCap(t *testing.T) {
-	l, err := NewLedger(priced(100), "", day0)
+	l, err := NewLedger(priced(10000), "", day0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := l.Budget().OfflineCap(), 25.0; got != want {
-		t.Fatalf("default offline cap = %g, want %g", got, want)
+	if got, want := l.Budget().OfflineCap(), cell.Money(2500); got != want {
+		t.Fatalf("default offline cap = %s, want %s", got, want)
 	}
 }
 
@@ -80,8 +82,8 @@ func TestValidateRejectsALooserOfflineCap(t *testing.T) {
 	// A looser offline cap inverts the §7 rule, so it is a startup error rather
 	// than a configuration that quietly makes the least informed spend the
 	// least constrained.
-	b := priced(10)
-	b.OfflineInferenceDaily = 20
+	b := priced(1000)
+	b.OfflineInferenceDaily = 2000
 	if err := b.Validate(); err == nil {
 		t.Fatal("an offline cap looser than the online cap was accepted")
 	}
@@ -89,11 +91,11 @@ func TestValidateRejectsALooserOfflineCap(t *testing.T) {
 
 func TestValidateRejectsAnUnpriceableBudget(t *testing.T) {
 	// A cell that can spend but cannot price what it spends has no cap at all.
-	if err := (Budget{InferenceDaily: 50}).Validate(); err == nil {
+	if err := (Budget{InferenceDaily: 5000}).Validate(); err == nil {
 		t.Fatal("a budget with a cap but no price was accepted")
 	}
 	// Either pricing form is enough.
-	if err := (Budget{InferenceDaily: 50, CostPerKTokenOut: 0.01}).Validate(); err != nil {
+	if err := (Budget{InferenceDaily: 5000, CostPerKTokenOut: 1}).Validate(); err != nil {
 		t.Fatalf("a token-priced budget was rejected: %v", err)
 	}
 	// A cell with no inference budget needs no price: that is a verify/build
@@ -117,27 +119,28 @@ func TestNoInferenceBudgetRefusesByName(t *testing.T) {
 }
 
 func TestPriceUsesTokensWhenReportedAndPerCallWhenNot(t *testing.T) {
-	b := Budget{InferenceDaily: 100, PerCallCost: 0.5, CostPerKTokenIn: 1, CostPerKTokenOut: 2}
-	if got, want := b.Price(1000, 500), 1.0+1.0; got != want {
-		t.Fatalf("token price = %g, want %g", got, want)
+	b := Budget{InferenceDaily: 10000, PerCallCost: 50, CostPerKTokenIn: 100, CostPerKTokenOut: 200}
+	// 1000 in at 1.00/k plus 500 out at 2.00/k.
+	if got, want := b.Price(1000, 500), cell.Money(100+100); got != want {
+		t.Fatalf("token price = %s, want %s", got, want)
 	}
 	// A CLI runtime reports nothing; that call must still cost something, or a
 	// cell driving a local binary has no cap.
-	if got, want := b.Price(0, 0), 0.5; got != want {
-		t.Fatalf("per-call price = %g, want %g", got, want)
+	if got, want := b.Price(0, 0), cell.Money(50); got != want {
+		t.Fatalf("per-call price = %s, want %s", got, want)
 	}
 	// Usage reported but no per-token price configured: fall back rather than
 	// charge zero. An under-approximation still moves the ledger; a zero never
 	// halts.
-	noTokenPrice := Budget{InferenceDaily: 10, PerCallCost: 0.25}
-	if got, want := noTokenPrice.Price(1000, 1000), 0.25; got != want {
-		t.Fatalf("fallback price = %g, want %g", got, want)
+	noTokenPrice := Budget{InferenceDaily: 1000, PerCallCost: 25}
+	if got, want := noTokenPrice.Price(1000, 1000), cell.Money(25); got != want {
+		t.Fatalf("fallback price = %s, want %s", got, want)
 	}
 }
 
 func TestDayRollsOverAndPersistenceSurvivesRestart(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "ledger.json")
-	l, err := NewLedger(priced(3), path, day0)
+	l, err := NewLedger(priced(300), path, day0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,15 +153,15 @@ func TestDayRollsOverAndPersistenceSurvivesRestart(t *testing.T) {
 
 	// A restart must not hand the cell a fresh cap: a daily cap that resets on
 	// every crash is not a daily cap.
-	reopened, err := NewLedger(priced(3), path, day0)
+	reopened, err := NewLedger(priced(300), path, day0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if reopened.CanSpend(day0, false).OK {
 		t.Fatal("restarting reset the daily cap")
 	}
-	if got := reopened.Snapshot(day0).Spent; got != 3 {
-		t.Fatalf("restored spend = %g, want 3", got)
+	if got := reopened.Snapshot(day0).Spent; got != 300 {
+		t.Fatalf("restored spend = %s, want 3.00", got)
 	}
 
 	// The next UTC day starts fresh.
@@ -167,7 +170,7 @@ func TestDayRollsOverAndPersistenceSurvivesRestart(t *testing.T) {
 		t.Fatalf("the cap did not roll over: %s", d)
 	}
 	if got := reopened.Snapshot(nextDay).Spent; got != 0 {
-		t.Fatalf("spend after rollover = %g, want 0", got)
+		t.Fatalf("spend after rollover = %s, want 0", got)
 	}
 }
 
@@ -178,13 +181,13 @@ func TestACorruptLedgerRefusesToStart(t *testing.T) {
 	if err := os.WriteFile(path, []byte("not json"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewLedger(priced(3), path, day0); err == nil {
+	if _, err := NewLedger(priced(300), path, day0); err == nil {
 		t.Fatal("a corrupt ledger was treated as empty")
 	}
 }
 
 func TestVerifySlotsAreBounded(t *testing.T) {
-	l, err := NewLedger(priced(10), "", day0)
+	l, err := NewLedger(priced(1000), "", day0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +215,7 @@ func TestVerifySlotsAreBounded(t *testing.T) {
 }
 
 func TestAttemptsHonoursOverrideThenDefault(t *testing.T) {
-	b := priced(10)
+	b := priced(1000)
 	if got := b.Attempts(0); got != 3 {
 		t.Fatalf("attempts = %d, want the declared default 3", got)
 	}

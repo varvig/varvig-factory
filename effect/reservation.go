@@ -154,7 +154,7 @@ func (r Reservation) Open() bool {
 func (r Reservation) String() string {
 	s := fmt.Sprintf("%s %s/%s %s", short(r.Key), r.CellID, r.Capability, r.State)
 	if r.Amount > 0 {
-		s += fmt.Sprintf(" %s %s", r.Amount, r.Unit)
+		s += fmt.Sprintf(" %s %s", r.Amount.In(r.Unit), r.Unit)
 	}
 	if r.ExternalRef != "" {
 		s += " ref=" + r.ExternalRef
@@ -377,7 +377,7 @@ func Settle(f varvigcli.FactoryRepo, p varvigcli.ProjectRepo, c Claim, externalR
 	r.State, r.ExternalRef, r.SettledAt, r.HoldReleased = StateDone, externalRef, at, true
 	if actual != r.Amount {
 		r.Actual = actual
-		r.Detail = fmt.Sprintf("quoted %s %s, actual %s %s", r.Amount, r.Unit, actual, r.Unit)
+		r.Detail = fmt.Sprintf("quoted %s %s, actual %s %s", r.Amount.In(r.Unit), r.Unit, actual.In(r.Unit), r.Unit)
 	}
 	hash, err := update(p, r, c.Hash)
 	if err != nil {

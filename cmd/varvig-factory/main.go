@@ -55,6 +55,9 @@ func main() {
 		"agreement":    cmdAgreement,
 		"budget":       cmdBudget,
 		"authority":    cmdAuthority,
+		"connector":    cmdConnector,
+		"reputation":   cmdReputation,
+		"interfaces":   cmdInterfaces,
 		"gate":         cmdGate,
 		"version":      cmdVersion,
 	}
@@ -99,6 +102,16 @@ promotable changes on top of varvig.
                                     they represent (§8.1, §8.2)
   varvig-factory gate --bind MODULE.wasm [-c F]
                                     bind the promotion-policy wasm module (§6.2)
+  varvig-factory connector awaiting [--alias A | --interface H]
+                                    offers a connector could take (JSON)
+  varvig-factory connector take --cell C --key K --connector ID
+                                    claim one offer; exactly one connector wins
+  varvig-factory connector report --cell C --key K --connector ID
+              --happened true|false [--ref R] [--actual A] [--detail D]
+                                    record what happened; the cell settles it
+  varvig-factory reputation         each cell's derived record, best first
+  varvig-factory interfaces [list | publish --alias A --schema FILE]
+                                    the interface registry
   varvig-factory version
 
 Promotion is gated by default, everywhere. Autonomous mode is per-path, requires
@@ -278,7 +291,7 @@ func cmdOnce(args []string) error {
 	}
 	fmt.Println(rep.Summary())
 	for _, a := range rep.Attempts {
-		fmt.Printf("attempt %s #%d -> %s (env %s, cost %.4g)\n",
+		fmt.Printf("attempt %s #%d -> %s (env %s, cost %s)\n",
 			shortID(a.Task), a.N, shortID(a.Change), shortID(a.Environment), a.Cost)
 	}
 	for _, v := range rep.Verified {
@@ -497,8 +510,8 @@ func cmdBudget(args []string) error {
 	snap := built.Ledger.Snapshot(now)
 	b := built.Ledger.Budget()
 	fmt.Printf("day               %s\n", snap.Day)
-	fmt.Printf("inference spent   %.4g of %.4g\n", snap.Spent, snap.Cap)
-	fmt.Printf("offline spent     %.4g of %.4g\n", snap.OfflineSpent, snap.OfflineCap)
+	fmt.Printf("inference spent   %s of %s\n", snap.Spent, snap.Cap)
+	fmt.Printf("offline spent     %s of %s\n", snap.OfflineSpent, snap.OfflineCap)
 	fmt.Printf("calls             %d\n", snap.Calls)
 	fmt.Printf("verify concurrent %d\n", b.VerifyConcurrent)
 	fmt.Printf("storage cap       %.4g GB\n", b.StorageGB)

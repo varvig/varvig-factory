@@ -42,8 +42,8 @@ func TestIntegrationEffectfulTicketAgainstRealCore(t *testing.T) {
 	v := varvigcli.Exec{Bin: bin, Dir: repo}
 	fr, pr := varvigcli.Collapsed(v)
 
-	iface := boardInterface(t)
-	spec := fmt.Sprintf("Order the prototype run.\nfactory-requires: effect=pcb-fabrication@1 interface=%s\nfactory-effect: {\"gerber\":\"rev-c\",\"quantity\":5}", iface)
+	ifaceHash := boardInterface(t, fr)
+	spec := fmt.Sprintf("Order the prototype run.\nfactory-requires: effect=pcb-fabrication@1 interface=%s\nfactory-effect: {\"gerber\":\"rev-c\",\"quantity\":5}", ifaceHash)
 
 	// Mint the ticket through core, so the directive goes through core's own
 	// spec storage rather than a fixture this test wrote.
@@ -72,8 +72,8 @@ func TestIntegrationEffectfulTicketAgainstRealCore(t *testing.T) {
 	if req.Effect.Malformed != "" {
 		t.Fatalf("the directive read back malformed: %s", req.Effect.Malformed)
 	}
-	if req.Effect.Interface != iface {
-		t.Fatalf("interface = %q, want %q", req.Effect.Interface, iface)
+	if req.Effect.Interface != ifaceHash {
+		t.Fatalf("interface = %q, want %q", req.Effect.Interface, ifaceHash)
 	}
 
 	env := authority.Envelope{
@@ -91,12 +91,12 @@ func TestIntegrationEffectfulTicketAgainstRealCore(t *testing.T) {
 		t.Fatalf("real core refused a lease: %v", err)
 	}
 
-	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: iface, Effectful: true}
+	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: ifaceHash, Effectful: true}
 	fake := effect.NewFake(capability, 32000, "EUR")
 	c := &Cell{
 		Capabilities: cell.Capabilities{
 			CellID:  "mini-a",
-			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: iface}},
+			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: ifaceHash}},
 		},
 		Factory:            fr,
 		Project:            pr,
