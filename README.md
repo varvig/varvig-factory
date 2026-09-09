@@ -658,6 +658,9 @@ budget/              spend caps, halt behaviour, storage-pressure relief
 authority/           envelopes and leases: shared ceilings versus exclusive
                      allocations, what a stale view still permits, and the refs
                      they live in — all of it in the coordination repo
+iface/               the interface registry: schemas as objects, resolvable by
+                     the hash a capability names
+reputation/          per-cell standing, derived from what was promoted
 effect/              effectful, non-regenerable capabilities — the refusals,
                      reserve/execute/settle over a reservation ref, and the
                      executor seam (with a refusing default and a counting fake)
@@ -767,6 +770,93 @@ are mutually exclusive.
 me a circuit board" by writing code is the failure mode that rule exists to
 prevent, so the requirement survives with the reason attached and the ticket is
 skipped rather than reinterpreted.
+
+## A connector is any process that can run the binary
+
+The connector protocol is repository state: the cell offers, a connector takes by
+compare-and-swap, executes, and reports; the cell settles. Three verbs make that
+reachable from outside this module.
+
+```sh
+varvig-factory connector awaiting --alias pcb-fabrication@1     # what could I serve?
+varvig-factory connector take --cell mini-a --key $KEY --connector fab-a
+# ... do the work ...
+varvig-factory connector report --cell mini-a --key $KEY --connector fab-a \
+    --happened true --ref PO-90210 --actual 355.40
+```
+
+JSON in, JSON out, so the process on the other end can be a shell script. Until
+these existed a vendor had to be compiled into the factory binary — which is the
+rebuild the protocol was built to avoid, so the protocol was not yet delivering
+the thing it was for.
+
+**A connector reports; only the cell spends.** Converting a hold into settled
+spend needs the lease, the lease lives in the coordination replica, and a
+connector is never handed one — a vendor that could write the lease could write
+its own payment. `take` and `report` need only the project replica, and the cell
+settles against the lease on its next pass. That asymmetry is the design, not a
+missing feature.
+
+**Exactly one connector wins a take.** It is varvig's ordinary ref
+compare-and-swap and nothing else — no lock, no lease, no coordinator. A
+connector that loses is told so and must not execute, and that refusal is the
+whole mechanism standing between two connectors and two identical orders.
+
+**`--happened` has no default.** The two answers are not near-misses of each
+other: one converts a hold into spend and the other gives it back. A flag whose
+absence meant either would make the most consequential field in the protocol the
+easiest one to leave out. A timeout is neither — a connector that did not hear
+back reports nothing and lets the reservation stand as pending, which is the
+honest record of an unknown outcome.
+
+## The interface registry
+
+A capability reference binds to the interface **hash**, and that hash is now the
+id of a stored schema object. Publishing writes the canonical schema; the id that
+comes back *is* the hash. So resolving is an ordinary blob read at the same id
+the capability names, and the registry cannot disagree with the hash it is keyed
+by.
+
+```sh
+varvig-factory interfaces publish --alias pcb-fabrication@1 --schema board.json
+varvig-factory interfaces list
+varvig-factory interfaces show --alias pcb-fabrication@1
+```
+
+**An interface the registry does not hold is refused before the money.** A hash
+is enough to tell two interfaces apart, which is what matching needs, and not
+enough to say what an action requires. Acting on a hash nobody published means
+ordering a shape no one in the factory can describe — and the moment to discover
+that is before the order, not in the invoice.
+
+The alias is a convenience and never authority. Re-pointing one changes what a
+human types and nothing about what a lease bounds or what an idempotency key
+covers, because the hash is in the key.
+
+## Reputation is derived, and deliberately not acted on
+
+A cell's capabilities object is a *claim* — nothing checks it, and that is fine,
+because a cell that lies about its model produces worse work and the work is what
+gets scored. What was missing was anyone scoring per cell.
+
+```
+varvig-factory reputation
+mini-a     2 of 2 attempts promoted across 2 task(s)  (100%)
+micro-b    0 of 2 attempts promoted across 2 task(s)  (0%)
+```
+
+Standing is: of the attempts a cell made at tasks later promoted, how many were
+the attempt that moved. Credit follows the **change**, not whoever moved the ref
+— in a flat factory the cell that promotes is usually not the cell that produced
+the work. Attempts at tasks nobody has promoted are excluded, because unfinished
+is not failed. A cell with no record has no rate rather than a rate of zero:
+those are opposite answers, and a newcomer reading as the worst possible cell is
+how a metric becomes a barrier to entry.
+
+**Nothing in the loop reads it.** A cell consulting reputation to decide whether
+to attempt would be ordering work by a quality judgement, which is varvig's job
+— and it would compound, since a cell that attempts less has less record. The
+number is for whoever can see the whole picture.
 
 ## One factory repository, N project repositories
 
@@ -1042,13 +1132,11 @@ with the contract-level detail.
 
 | Gap | What is missing |
 |---|---|
-| **No interface registry** (§2.1) | A capability reference already binds to the interface *hash*, which is the part that matters for safety — a ticket, a cell's configuration and a lease must all name the same hash before anything is ordered. What is missing is the registry the hash points into: interfaces published as varvig objects and resolvable by hash. |
-| **No derived reputation** (§2.2) | Capability claims are advisory and standing should be derived from promotion history. Only the agreement-rate metric is derived today, and it is per scope rather than per cell. |
-| **Compute budget is a `float64`** | The *authority* amounts are integers now; the inference budget is not. It accumulates and drifts the same way, but it bounds regenerable spend, so no refusal there is irreversible and no hold has to round-trip. Converting it for symmetry would be a bigger diff for a much weaker reason. |
-| **One exponent for every currency** | Money formats and parses at two decimal places, right for EUR and USD and wrong for JPY. A display bug for such a currency, never a spend error — the stored integer is whatever was put in it. Modelling the exponent needs currency data this module does not carry. |
+| **No connector implementations** | The protocol is reachable now — `connector awaiting`/`take`/`report` mean a vendor is any process that can run the binary — but nothing ships that speaks it, and every effectful path is still exercised against a counting fake. |
+| **`varvig update-ref` accepts a dangling object** (varvig) | A ref can be pointed at an object the repository does not have. Caught downstream by a loud transfer failure; better refused at the write. |
 
-The first two are scope. The last two are bounded representation choices, both
-of which cost a wrong number on a screen rather than a wrong number in a ledger.
+The first is the honest state of the vendor side: the door exists and nobody has
+walked through it yet. The second is varvig's to fix.
 
 ## Repository name
 

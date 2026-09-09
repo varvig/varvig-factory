@@ -15,6 +15,8 @@ import (
 	"github.com/varvig/varvig-factory/claim"
 	"github.com/varvig/varvig-factory/effect"
 	"github.com/varvig/varvig-factory/varvigcli"
+
+	"github.com/varvig/varvig-factory/iface"
 )
 
 const effTicket = "c3feed0000000000000000000000000000000000000000000000000000000009"
@@ -22,27 +24,33 @@ const effTicket = "c3feed0000000000000000000000000000000000000000000000000000000
 var effClock = time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
 
 // boardInterface is a stable interface hash for the tests.
-func boardInterface(t *testing.T) string {
+// boardInterface publishes the board-fabrication schema into a factory's
+// registry and returns its hash.
+//
+// It publishes rather than computing a hash because the effectful path now
+// refuses an interface the registry does not hold — a hash nobody published
+// describes nothing, and acting on it means ordering a shape no one here can
+// state. A test that minted a bare hash would be testing a path a cell no longer
+// takes.
+func boardInterface(t *testing.T, f varvigcli.FactoryRepo) string {
 	t.Helper()
-	labelled, err := cell.CanonicalHash(map[string]any{"gerber": "string", "quantity": "integer"})
+	hash, err := iface.Publish(f, "pcb-fabrication@1", map[string]any{
+		"gerber": "string", "quantity": "integer",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	mh, err := cell.ToMultihash(labelled)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return mh
+	return hash
 }
 
 // effectCell builds a cell equipped to order boards: the capability declared, a
 // lease held, an envelope above it, and a fake executor.
 func effectCell(t *testing.T, amount cell.Money) (*Cell, *varvigcli.Fake, *effect.Fake) {
 	t.Helper()
-	iface := boardInterface(t)
 	v := varvigcli.NewFake("mini-a")
 	fr, pr := varvigcli.Collapsed(v)
-	spec := fmt.Sprintf("Order the prototype run.\nfactory-requires: effect=pcb-fabrication@1 interface=%s\nfactory-effect: {\"gerber\":\"rev-c\",\"quantity\":5}", iface)
+	ifaceHash := boardInterface(t, fr)
+	spec := fmt.Sprintf("Order the prototype run.\nfactory-requires: effect=pcb-fabrication@1 interface=%s\nfactory-effect: {\"gerber\":\"rev-c\",\"quantity\":5}", ifaceHash)
 	v.AddTicket(effTicket, spec, varvigcli.Scope{Reads: []string{"hardware"}, Writes: []string{"hardware"}}, "approved")
 
 	env := authority.Envelope{
@@ -60,12 +68,12 @@ func effectCell(t *testing.T, amount cell.Money) (*Cell, *varvigcli.Fake, *effec
 		t.Fatal(err)
 	}
 
-	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: iface, Effectful: true}
+	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: ifaceHash, Effectful: true}
 	fake := effect.NewFake(capability, 32000, "EUR")
 	// A ledger, because Once consults it for every ticket — including, as a
 	// separate test asserts, effectful ones it must not gate.
 	ledger, err := budget.NewLedger(
-		budget.Budget{InferenceDaily: 10, VerifyConcurrent: 1, StorageGB: 1, AttemptsDefault: 1, PerCallCost: 0.01},
+		budget.Budget{InferenceDaily: 1000, VerifyConcurrent: 1, StorageGB: 1, AttemptsDefault: 1, PerCallCost: 1},
 		filepath.Join(t.TempDir(), "ledger.json"), effClock)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +81,7 @@ func effectCell(t *testing.T, amount cell.Money) (*Cell, *varvigcli.Fake, *effec
 	c := &Cell{
 		Capabilities: cell.Capabilities{
 			CellID:  "mini-a",
-			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: iface}},
+			Effects: []cell.EffectCapability{{ID: "pcb-fabrication@1", Interface: ifaceHash}},
 		},
 		Factory:            fr,
 		Project:            pr,
@@ -414,8 +422,8 @@ func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
 	// test code calling the protocol — which is the point, since a real one is a
 	// separate process doing exactly this.
 	c, v, fake := effectCell(t, 100000)
-	iface := boardInterface(t)
-	c.Connectors = map[string]bool{iface: true}
+	ifaceHash := boardInterface(t, c.Factory)
+	c.Connectors = map[string]bool{ifaceHash: true}
 
 	res, err := c.performEffect(context.Background(), effectTicket(t, v))
 	if err != nil {
@@ -438,8 +446,8 @@ func TestAConnectorServedCapabilityRoundTrips(t *testing.T) {
 	}
 
 	// A connector, elsewhere.
-	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: iface, Effectful: true}
-	awaiting, err := effect.Awaiting(c.Project, capability)
+	capability := effect.Capability{ID: "pcb-fabrication@1", Interface: ifaceHash, Effectful: true}
+	awaiting, err := effect.Awaiting(c.Project, capability.Interface)
 	if err != nil || len(awaiting) != 1 {
 		t.Fatalf("awaiting = %+v (err %v)", awaiting, err)
 	}

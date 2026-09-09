@@ -353,8 +353,8 @@ func Mini(cellID string) Config {
 		Temperature:  0.2,
 	}
 	c.Budget = budget.Budget{
-		InferenceDaily:   50,
-		PerCallCost:      0.02,
+		InferenceDaily:   5000, // 50.00
+		PerCallCost:      2,    // 0.02
 		VerifyConcurrent: 4,
 		StorageGB:        200,
 		AttemptsDefault:  3,

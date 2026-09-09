@@ -35,7 +35,7 @@ func TestAConnectorFindsAndTakesWork(t *testing.T) {
 
 	// The inbox is derived from repository state, not a queue: a connector that
 	// restarts sees the same list.
-	awaiting, err := Awaiting(v.P, c)
+	awaiting, err := Awaiting(v.P, c.Interface)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestAConnectorFindsAndTakesWork(t *testing.T) {
 	}
 
 	// Once taken it leaves the inbox, so a second connector does not see it.
-	if awaiting, err := Awaiting(v.P, c); err != nil || len(awaiting) != 0 {
+	if awaiting, err := Awaiting(v.P, c.Interface); err != nil || len(awaiting) != 0 {
 		t.Fatalf("a taken reservation is still offered: %+v (err %v)", awaiting, err)
 	}
 }
@@ -186,7 +186,7 @@ func TestAConnectorCannotInventWork(t *testing.T) {
 	c := fabrication(t)
 	v, _ := leased(t, 100000, 20)
 
-	if awaiting, err := Awaiting(v.P, c); err != nil || len(awaiting) != 0 {
+	if awaiting, err := Awaiting(v.P, c.Interface); err != nil || len(awaiting) != 0 {
 		t.Fatalf("awaiting = %+v (err %v), want nothing before anything is offered", awaiting, err)
 	}
 	if _, err := Take(v.P, "mini-a", strings.Repeat("a", 64), "fab-a", at.Unix(), 0); err == nil {
@@ -309,7 +309,7 @@ func TestIntegrationConnectorExchangeAgainstRealCore(t *testing.T) {
 	g := authority.Grant{Envelope: env, Lease: &l, LeaseHash: leaseHash}
 
 	claim := offered(t, v, g, c, at.Unix()+600)
-	awaiting, err := Awaiting(v.P, c)
+	awaiting, err := Awaiting(v.P, c.Interface)
 	if err != nil || len(awaiting) != 1 {
 		t.Fatalf("awaiting against a real core = %+v (err %v)", awaiting, err)
 	}

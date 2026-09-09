@@ -194,7 +194,7 @@ type AttemptResult struct {
 	Environment string
 	Evidence    cell.Evidence
 	Artifacts   []cell.ArtifactRef
-	Cost        float64
+	Cost        cell.Money
 }
 
 // VerifyResult is one peer attempt this cell verified.

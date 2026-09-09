@@ -10,6 +10,8 @@ import (
 	"github.com/varvig/varvig-factory/cell"
 	"github.com/varvig/varvig-factory/claim"
 	"github.com/varvig/varvig-factory/effect"
+
+	"github.com/varvig/varvig-factory/iface"
 )
 
 // The effectful branch of the loop (§6.7, §7.1).
@@ -58,9 +60,9 @@ type EffectResult struct {
 func (r EffectResult) String() string {
 	switch {
 	case r.Done:
-		return fmt.Sprintf("%s %s: done ref=%s (%s %s)", shortID(r.Task), r.Capability, r.ExternalRef, r.Amount, r.Unit)
+		return fmt.Sprintf("%s %s: done ref=%s (%s %s)", shortID(r.Task), r.Capability, r.ExternalRef, r.Amount.In(r.Unit), r.Unit)
 	case r.Offered:
-		return fmt.Sprintf("%s %s: offered to a connector (%s %s held)", shortID(r.Task), r.Capability, r.Amount, r.Unit)
+		return fmt.Sprintf("%s %s: offered to a connector (%s %s held)", shortID(r.Task), r.Capability, r.Amount.In(r.Unit), r.Unit)
 	case r.Unresolved:
 		return fmt.Sprintf("%s %s: UNRESOLVED — may have happened, escalating: %s", shortID(r.Task), r.Capability, r.Reason)
 	default:
@@ -103,6 +105,20 @@ func (c *Cell) performEffect(ctx context.Context, t claim.Ticket) (EffectResult,
 	res := EffectResult{Task: t.ID, Capability: e.Capability}
 
 	capability := effect.Capability{ID: e.Capability, Interface: e.Interface, Effectful: true}
+
+	// The interface must resolve in the registry before anything else happens.
+	//
+	// A hash is enough to tell two interfaces apart, which is what the matching
+	// rules need, and not enough to know what the action requires. Acting on a
+	// hash nothing in the factory has ever published means placing an order
+	// whose shape no one here can describe — and the moment to find that out is
+	// before the money, not in the invoice.
+	if !iface.Known(c.Factory, capability.Interface) {
+		return refused(res, fmt.Sprintf(
+			"interface %s is not in this factory's registry; a capability whose interface nobody published is one nothing here can describe",
+			shortID(capability.Interface))), nil
+	}
+
 	executor, err := c.Executors.For(capability)
 	if err != nil {
 		return refused(res, err.Error()), nil

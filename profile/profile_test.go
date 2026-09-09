@@ -202,7 +202,7 @@ func TestDurationsAreStrings(t *testing.T) {
 	if _, err := Load(path); err == nil {
 		t.Fatal("a numeric duration was accepted")
 	}
-	if err := os.WriteFile(path, []byte(`{"cell_id":"mini-a","claim_ttl":"30m","roles":["verify"],"inference":{"kind":"none","tier":"none"},"sandbox":{"kind":"subprocess"},"artifacts":{"kind":"local"},"budget":{"inference_daily":0,"verify_concurrent":1,"storage_gb":1,"attempts_default":1}}`), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(`{"cell_id":"mini-a","claim_ttl":"30m","roles":["verify"],"inference":{"kind":"none","tier":"none"},"sandbox":{"kind":"subprocess"},"artifacts":{"kind":"local"},"budget":{"inference_daily_minor":0,"verify_concurrent":1,"storage_gb":1,"attempts_default":1}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	c, err := Load(path)

@@ -86,6 +86,16 @@ const (
 	// ReservationPrefix roots reservations held against a lease while an
 	// effectful action is in flight (CELL.md §12.3).
 	ReservationPrefix = Prefix + "reservations/"
+
+	// InterfacePrefix roots the interface registry: refs/factory/interfaces/<alias>
+	// points at the schema object whose id is the interface hash.
+	//
+	// The registry is a convenience over the hash and never a substitute for it.
+	// A capability reference binds to the *hash*, so re-pointing an alias cannot
+	// make a new action look like an old one — the hash is in the idempotency key
+	// (§8.2). What the alias buys is a name a person can type and an answer to
+	// "what does this hash actually require", which a bare hash cannot give.
+	InterfacePrefix = Prefix + "interfaces/"
 )
 
 // ValidID reports whether s is a well-formed cell id: lowercase alphanumeric
@@ -254,6 +264,31 @@ func LeaseRef(cellID, capability string) (string, error) {
 		return "", fmt.Errorf("cell: lease ref needs a capability")
 	}
 	return LeasePrefix + cellID + "/" + hex.EncodeToString([]byte(capability)), nil
+}
+
+// InterfaceRef names an interface alias in the registry.
+//
+// The alias is hex-encoded for the same reason a capability is in LeaseRef: an
+// alias like "pcb-fabrication@1" carries punctuation a ref path component should
+// not, and encoding it is cheaper than forbidding the names people actually use.
+func InterfaceRef(alias string) (string, error) {
+	if strings.TrimSpace(alias) == "" {
+		return "", fmt.Errorf("cell: interface ref needs an alias")
+	}
+	return InterfacePrefix + hex.EncodeToString([]byte(alias)), nil
+}
+
+// ParseInterfaceRef recovers the alias from a registry ref.
+func ParseInterfaceRef(name string) (string, error) {
+	rest, ok := strings.CutPrefix(name, InterfacePrefix)
+	if !ok {
+		return "", fmt.Errorf("cell: %q is not an interface ref", name)
+	}
+	raw, err := hex.DecodeString(rest)
+	if err != nil {
+		return "", fmt.Errorf("cell: interface ref %q does not carry a hex alias", name)
+	}
+	return string(raw), nil
 }
 
 // ReservationRef names a reservation held by a cell against an idempotency key.

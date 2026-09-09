@@ -89,9 +89,13 @@ func Offer(p varvigcli.ProjectRepo, c Claim, deadline int64) (Claim, error) {
 // Matching is on the interface **hash**, never the alias: a connector serving a
 // different interface under the same name is serving a different capability
 // (§2.1), and here that mistake is resolved by spending money.
-func Awaiting(p varvigcli.ProjectRepo, capability Capability) ([]Reservation, error) {
-	if err := capability.Validate(); err != nil {
-		return nil, err
+// It takes the interface hash rather than a whole Capability, because the hash
+// is the only part it ever used. Asking for more made a connector name a
+// capability id it has no reason to know — it serves an *interface*, and which
+// aliases point at that interface is the factory's business, not the vendor's.
+func Awaiting(p varvigcli.ProjectRepo, interfaceHash string) ([]Reservation, error) {
+	if interfaceHash != "" && !cell.IsMultihash(interfaceHash) {
+		return nil, fmt.Errorf("effect: %q is not an interface hash", interfaceHash)
 	}
 	all, err := allReservations(p)
 	if err != nil {
@@ -99,9 +103,15 @@ func Awaiting(p varvigcli.ProjectRepo, capability Capability) ([]Reservation, er
 	}
 	var out []Reservation
 	for _, r := range all {
-		if r.State == StateOffered && r.Interface == capability.Interface {
-			out = append(out, r)
+		if r.State != StateOffered {
+			continue
 		}
+		// An empty hash means "everything on offer", which is what a connector
+		// polling for work it might serve actually wants to ask.
+		if interfaceHash != "" && r.Interface != interfaceHash {
+			continue
+		}
+		out = append(out, r)
 	}
 	return out, nil
 }
