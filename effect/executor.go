@@ -8,8 +8,7 @@ import (
 	"github.com/varvig/varvig-factory/cell"
 )
 
-// The executor seam: the one place Factory touches an external world that
-// charges money.
+// The executor seam: the one place Factory causes something it cannot take back.
 //
 // It is an interface for the same reason the model runtime and the build sandbox
 // are (§4): the thing behind it is a vendor, and a vendor reached directly from
@@ -56,6 +55,36 @@ type Outcome struct {
 }
 
 // Executor performs effectful actions for one or more capabilities.
+//
+// # Not cell.Executor, and not a third thing either
+//
+// This module has exactly two executor seams and they divide on reversibility:
+//
+//	cell.Executor    authors a change, runs a build, runs a test — run it again
+//	effect.Executor  a physical or billable outcome — nothing to undo
+//
+// Everything in this package exists because of that second line. Note that the
+// division is reversibility, not cost: a capability that costs nothing but
+// cannot be un-done is still one of these, and §8.0's rules apply to it in full.
+//
+// # Two locations, one seam
+//
+// An effectful capability is performed in one of two places, and the choice is
+// a deployment decision rather than a second concept:
+//
+//	in-process   this interface, called directly by the cell
+//	connector    another process entirely; see connector.go
+//
+// In the connector case the cell implements **none of this interface** for that
+// capability. It reserves, writes an offer, and stops; the peer takes the offer,
+// acts, and reports. So "a connector" is not a plugin or a kind of capability —
+// it is an effect executor that lives somewhere else.
+//
+// The deciding question is credentials, not physicality. Work that happens on
+// this machine — a pin, an arm, a printer — has nothing to leak and belongs
+// here. A service holding an account in someone's name belongs in a connector,
+// because compiling it in means a rebuild per vendor and that vendor's
+// credentials in the cell's process.
 type Executor interface {
 	// Supports reports whether this executor can act for a capability. Matching
 	// is on the interface **hash**, never the alias (§2.1).

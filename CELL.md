@@ -1,6 +1,6 @@
 # The Cell Contract
 
-*Normative. Version 12* — adds `edits_in_place` and the tool channel's rules (§6.1); moves the executor contract to `cell.Executor`, so it is visibly not `effect.Executor` (§6); adds robes and the responsibilities that carry no authority (§3.4), externally-originated tickets (§3.5) and decision tasks (§5.1); folds the model-runtime and build-sandbox adapters into one executor seam (§6), separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
+*Normative. Version 13* — states that a connector is an effect executor in another process rather than a third seam, and that the two seams divide on reversibility rather than cost (§8.2); adds `edits_in_place` and the tool channel's rules (§6.1); moves the executor contract to `cell.Executor`, so it is visibly not `effect.Executor` (§6); adds robes and the responsibilities that carry no authority (§3.4), externally-originated tickets (§3.5) and decision tasks (§5.1); folds the model-runtime and build-sandbox adapters into one executor seam (§6), separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
 effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
@@ -540,7 +540,7 @@ conflate the reversible with the irreversible:
 | | Does | Undo |
 |---|---|---|
 | **Executor** (this section) | work *for* a cell — authors a change, runs a test | run it again |
-| **Effect executor** (§8.2) | reaches an outside world that *charges money* | nothing to undo |
+| **Effect executor** (§8.2) | a physical or billable outcome — anything *irreversible* | nothing to undo |
 
 Everything §8.2 exists for — the lease, the reservation, the higher principal,
 the refusal to speculate — follows from that second row. An executor in the
@@ -958,6 +958,38 @@ refusals:
    holds trivially — nothing here constructs a transaction at all — and it is
    written down so it keeps holding when a landing surface exists.
 
+#### One seam, two locations
+
+There is no third kind of executor. §6 has one seam for work a cell does, and
+this section has one seam for work that cannot be undone:
+
+| | Does | If it comes out wrong |
+|---|---|---|
+| **Cell executor** (§6) | authors a change, runs a build, runs a test | run it again |
+| **Effect executor** (this section) | a physical or billable outcome | there is nothing to undo |
+
+An **effect executor can live in either of two places**, and that choice is a
+deployment decision rather than a second concept:
+
+| | Where it runs | How the cell reaches it |
+|---|---|---|
+| In-process | inside the cell | a direct call |
+| **Connector** | a separate peer process | repository state — the cell holds no executor for that capability at all |
+
+A **connector is an effect executor that lives somewhere else.** It is not a
+plugin, not a third seam, and not a kind of capability. In the connector case
+the cell reserves, writes an offer, and stops; the peer takes the offer,
+performs the action, and reports.
+
+**The deciding question is credentials, not physicality.** A capability whose
+work happens on this machine — a pin, an arm, a printer — has nothing to leak
+and is naturally in-process. A capability that reaches a service holding an
+account in your name should be a connector, because compiling it in means a
+rebuild per vendor *and* that vendor's credentials in the cell's process.
+
+Both are equally legitimate and the rules above apply identically to each. What
+changes between them is where the vendor's code and credentials sit.
+
 #### How a ticket asks for one
 
 A ticket names an effectful capability in the same directive that carries build
@@ -1055,18 +1087,11 @@ the pass rather than being counted. The lease still holds rather than spends and
 the reservation still reads pending, so the operator sees an unresolved action
 rather than a clean slate.
 
-#### Connectors: how a vendor gets added without a rebuild
+#### The connector exchange
 
-A capability is performed either **in-process** or by a **connector peer**. The
-second is the one that matters for anything real, and it is modelled on how core
-does tracker bridges: a separate peer, holding its own credentials, that core
-"never learns the vendor's name" of, untrusted, and therefore able to run
-anywhere.
-
-The reason to prefer it here is sharper than for bridges. An executor holds
-credentials to a service that charges money. Compiling vendors into the cell
-binary would mean a rebuild to add one and those credentials living in the
-cell's process; a connector holds its own and needs neither.
+The out-of-process half of the seam above, modelled on how core does tracker
+bridges: a separate peer, holding its own credentials, whose vendor core "never
+learns the name" of, untrusted, and therefore able to run anywhere.
 
 **The interface is repository state, not an ABI.** There is nothing to load,
 nothing to link, and no version to keep in step:
