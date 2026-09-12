@@ -70,15 +70,6 @@ type Response struct {
 	Cost cell.Money
 }
 
-// ErrIndescribable is returned by an executor that cannot report a reproducible
-// environment fragment.
-//
-// One error for every executor, because it is one rule: an executor that cannot
-// describe itself cannot participate in cross-cell selection at all (§4), and
-// that is as true of a test runner as of a model. Having had two of these, one
-// per adapter, was a small symptom of the same split this fold removes.
-var ErrIndescribable = errors.New("executor: cannot describe its environment reproducibly")
-
 // Params are the sampling parameters that affect output. They are recorded in
 // the environment descriptor's model.params field, canonically, so that two
 // cells sampling differently are visibly not the same ground.
@@ -125,10 +116,10 @@ type None struct{}
 // Name implements Authoring.
 func (None) Name() string { return "none" }
 
-// Properties implements Executor. A cell with no model authors nothing, so
+// Properties implements cell.Executor. A cell with no model authors nothing, so
 // every property is false — including ConsumesLease, which is the honest answer
 // for an executor that never runs.
-func (None) Properties() Properties { return Properties{} }
+func (None) Properties() cell.ExecutorProperties { return cell.ExecutorProperties{} }
 
 // Fragment implements Authoring. A cell with no model contributes no model field:
 // build and test evidence must not carry one, or deterministic evidence would

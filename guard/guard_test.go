@@ -14,10 +14,14 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/varvig/varvig-factory/cell"
+	"github.com/varvig/varvig-factory/effect"
 )
 
 func moduleRoot(t *testing.T) string {
@@ -448,4 +452,56 @@ func namesExecutorType(e ast.Expr) bool {
 	}
 	pkg, ok := sel.X.(*ast.Ident)
 	return ok && pkg.Name == "executor"
+}
+
+// TestTheTwoExecutorSeamsStayDistinct holds the separation the cell.Executor /
+// effect.Executor naming exists to make visible.
+//
+// Two seams in this module have a claim to the word, and they are not
+// variations on one idea:
+//
+//	cell.Executor      performs regenerable work FOR a cell
+//	effect.Executor    reaches an outside world that CHARGES money
+//
+// The names now say so. What a name cannot do is stay true, and the way this
+// erodes is by convergence rather than by renaming: somebody gives
+// effect.Executor a Name() for better log lines, then Properties() because it
+// is useful, and one morning a type satisfies both and the distinction is
+// decorative. At that point "which executor is this" becomes a live question
+// again, and it is a question about whether an action can be undone.
+//
+// So: the two interfaces must share no method. Not because sharing one would
+// break anything immediately, but because the first shared method is the point
+// at which merging them starts to look reasonable.
+func TestTheTwoExecutorSeamsStayDistinct(t *testing.T) {
+	work := reflect.TypeOf((*cell.Executor)(nil)).Elem()
+	vendor := reflect.TypeOf((*effect.Executor)(nil)).Elem()
+
+	shared := []string{}
+	for i := 0; i < work.NumMethod(); i++ {
+		name := work.Method(i).Name
+		if _, ok := vendor.MethodByName(name); ok {
+			shared = append(shared, name)
+		}
+	}
+	if len(shared) > 0 {
+		t.Fatalf("cell.Executor and effect.Executor now share %v.\n"+
+			"They are different seams: one does work that can be run again, the other does\n"+
+			"something irreversible that costs money. A shared method is the first step to\n"+
+			"a shared interface, and then to code that cannot tell the two apart.",
+			shared)
+	}
+
+	// And neither is empty, so the check above is not passing vacuously — a
+	// seam gutted to nothing would share no methods either.
+	if work.NumMethod() == 0 || vendor.NumMethod() == 0 {
+		t.Fatalf("cell.Executor has %d methods and effect.Executor %d; an empty interface shares nothing with anything",
+			work.NumMethod(), vendor.NumMethod())
+	}
+
+	// Deliberately not asserted here: that cell.Executor still requires
+	// Fragment. Removing it breaks every implementation and the build fails
+	// before this test runs, so a check for it could never be the thing that
+	// caught anything — and a test that cannot fail on its own reads like
+	// protection without being any.
 }

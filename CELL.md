@@ -1,6 +1,6 @@
 # The Cell Contract
 
-*Normative. Version 10* — adds robes and the responsibilities that carry no authority (§3.4), externally-originated tickets (§3.5) and decision tasks (§5.1); folds the model-runtime and build-sandbox adapters into one executor seam (§6), separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
+*Normative. Version 11* — moves the executor contract to `cell.Executor`, so it is visibly not `effect.Executor` (§6); adds robes and the responsibilities that carry no authority (§3.4), externally-originated tickets (§3.5) and decision tasks (§5.1); folds the model-runtime and build-sandbox adapters into one executor seam (§6), separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
 effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
@@ -531,6 +531,27 @@ The rule that replaces them: **a new executor must never require a new
 concept.** A Claude Code harness is an executor whose properties say it loops and
 takes tools. A CNC machine is an executor whose properties say it is effectful.
 Neither needs an interface, a package, or a config section of its own.
+
+#### An executor is not an effect vendor
+
+Two things in this design have a claim to the word, and conflating them would
+conflate the reversible with the irreversible:
+
+| | Does | Undo |
+|---|---|---|
+| **Executor** (this section) | work *for* a cell — authors a change, runs a test | run it again |
+| **Effect executor** (§8.2) | reaches an outside world that *charges money* | nothing to undo |
+
+Everything §8.2 exists for — the lease, the reservation, the higher principal,
+the refusal to speculate — follows from that second row. An executor in the
+sense of this section needs none of it, because getting its work wrong costs
+another run.
+
+The distinction is carried in the names rather than left to context: the
+contract here is **`cell.Executor`**, and the vendor seam is `effect.Executor`.
+An executor may *declare* `effectful` as a property, and that declaration is not
+authority to act — it says what kind of thing the executor is, while what it may
+do still comes from a lease.
 
 ### 6.1 Properties, not kinds
 

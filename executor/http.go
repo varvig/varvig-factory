@@ -30,7 +30,7 @@ type HTTP struct {
 	Endpoint string
 	// VersionURL is probed once to measure the serving runtime's version, e.g.
 	// http://127.0.0.1:11434/api/version. It is REQUIRED: without it the
-	// adapter cannot describe itself and returns ErrIndescribable, because a
+	// adapter cannot describe itself and returns cell.ErrIndescribable, because a
 	// version read from configuration is a claim about the server rather than a
 	// measurement of it.
 	VersionURL string
@@ -62,12 +62,12 @@ type HTTP struct {
 // Name implements Authoring.
 func (h *HTTP) Name() string { return "http" }
 
-// Properties implements Executor. Identical to the subprocess model executor's,
+// Properties implements cell.Executor. Identical to the subprocess model executor's,
 // which is the point: where the model runs is not a property, and a hosted API
 // and a local server differ in latency and billing rather than in anything the
 // cell has to branch on (§3).
-func (h *HTTP) Properties() Properties {
-	return Properties{ConsumesLease: true}
+func (h *HTTP) Properties() cell.ExecutorProperties {
+	return cell.ExecutorProperties{ConsumesLease: true}
 }
 
 func (h *HTTP) client() *http.Client {
@@ -96,7 +96,7 @@ func (h *HTTP) probe(ctx context.Context) (cell.Fragment, error) {
 		return cell.Fragment{}, fmt.Errorf("inference: http runtime has no model configured")
 	}
 	if h.VersionURL == "" {
-		return cell.Fragment{}, fmt.Errorf("%w: no version_url configured for endpoint %s", ErrIndescribable, h.Endpoint)
+		return cell.Fragment{}, fmt.Errorf("%w: no version_url configured for endpoint %s", cell.ErrIndescribable, h.Endpoint)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, h.VersionURL, nil)
 	if err != nil {
@@ -105,15 +105,15 @@ func (h *HTTP) probe(ctx context.Context) (cell.Fragment, error) {
 	h.auth(req)
 	resp, err := h.client().Do(req)
 	if err != nil {
-		return cell.Fragment{}, fmt.Errorf("%w: probing %s: %v", ErrIndescribable, h.VersionURL, err)
+		return cell.Fragment{}, fmt.Errorf("%w: probing %s: %v", cell.ErrIndescribable, h.VersionURL, err)
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if err != nil {
-		return cell.Fragment{}, fmt.Errorf("%w: reading %s: %v", ErrIndescribable, h.VersionURL, err)
+		return cell.Fragment{}, fmt.Errorf("%w: reading %s: %v", cell.ErrIndescribable, h.VersionURL, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return cell.Fragment{}, fmt.Errorf("%w: %s returned %s", ErrIndescribable, h.VersionURL, resp.Status)
+		return cell.Fragment{}, fmt.Errorf("%w: %s returned %s", cell.ErrIndescribable, h.VersionURL, resp.Status)
 	}
 
 	version := extractVersion(body)

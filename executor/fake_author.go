@@ -39,13 +39,15 @@ type FakeAuthor struct {
 // Name implements Authoring.
 func (f *FakeAuthor) Name() string { return "fake" }
 
-// Properties implements Executor.
-func (f *FakeAuthor) Properties() Properties { return Properties{ConsumesLease: true} }
+// Properties implements cell.Executor.
+func (f *FakeAuthor) Properties() cell.ExecutorProperties {
+	return cell.ExecutorProperties{ConsumesLease: true}
+}
 
 // Fragment implements Authoring.
 func (f *FakeAuthor) Fragment(context.Context) (cell.Fragment, error) {
 	if f.Indescribable {
-		return cell.Fragment{}, fmt.Errorf("%w: fake configured as indescribable", ErrIndescribable)
+		return cell.Fragment{}, fmt.Errorf("%w: fake configured as indescribable", cell.ErrIndescribable)
 	}
 	version := f.RuntimeVersion
 	if version == "" {

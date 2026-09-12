@@ -120,15 +120,15 @@ func TestHTTPWithoutAVersionURLIsIndescribable(t *testing.T) {
 	// A version read from configuration is a claim about the server, not a
 	// measurement of it (CELL.md §6).
 	rt := &HTTP{Endpoint: "http://127.0.0.1:1/v1/chat/completions", Model: "m"}
-	if _, err := rt.Fragment(context.Background()); !errors.Is(err, ErrIndescribable) {
-		t.Fatalf("err = %v, want ErrIndescribable", err)
+	if _, err := rt.Fragment(context.Background()); !errors.Is(err, cell.ErrIndescribable) {
+		t.Fatalf("err = %v, want cell.ErrIndescribable", err)
 	}
 }
 
 func TestHTTPUnreachableServerIsIndescribableNotSilent(t *testing.T) {
 	rt := &HTTP{VersionURL: "http://127.0.0.1:1/version", Model: "m"}
-	if _, err := rt.Fragment(context.Background()); !errors.Is(err, ErrIndescribable) {
-		t.Fatalf("err = %v, want ErrIndescribable", err)
+	if _, err := rt.Fragment(context.Background()); !errors.Is(err, cell.ErrIndescribable) {
+		t.Fatalf("err = %v, want cell.ErrIndescribable", err)
 	}
 }
 
@@ -238,8 +238,8 @@ func TestCommandRuntimeMeasuresItsVersionAndGenerates(t *testing.T) {
 
 func TestCommandRuntimeWithoutVersionArgsIsIndescribable(t *testing.T) {
 	rt := &Command{Path: "sh", Model: "m"}
-	if _, err := rt.Fragment(context.Background()); !errors.Is(err, ErrIndescribable) {
-		t.Fatalf("err = %v, want ErrIndescribable", err)
+	if _, err := rt.Fragment(context.Background()); !errors.Is(err, cell.ErrIndescribable) {
+		t.Fatalf("err = %v, want cell.ErrIndescribable", err)
 	}
 }
 

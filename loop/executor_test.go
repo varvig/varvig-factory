@@ -21,8 +21,8 @@ type harness struct{ calls int }
 
 func (h *harness) Name() string { return "harness" }
 
-func (h *harness) Properties() executor.Properties {
-	return executor.Properties{Loops: true, ToolsAttached: true, ConsumesLease: true}
+func (h *harness) Properties() cell.ExecutorProperties {
+	return cell.ExecutorProperties{Loops: true, ToolsAttached: true, ConsumesLease: true}
 }
 
 func (h *harness) Fragment(context.Context) (cell.Fragment, error) {
@@ -84,7 +84,11 @@ func TestBothRolesShareOneSeam(t *testing.T) {
 	// Before the fold this did not compile, because there was no type both an
 	// inference.Runtime and a sandbox.Sandbox satisfied — which is exactly why
 	// a harness would have needed a third adapter.
-	var seams []executor.Executor
+	//
+	// The contract is cell.Executor rather than executor.Executor so that it is
+	// visibly not effect.Executor: this one performs regenerable work for a
+	// cell, that one reaches a world that charges money.
+	var seams []cell.Executor
 	seams = append(seams, &executor.FakeAuthor{Reply: "x"})
 	seams = append(seams, &executor.FakeChecker{})
 	seams = append(seams, &harness{})
