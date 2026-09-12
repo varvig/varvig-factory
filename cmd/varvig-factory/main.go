@@ -57,6 +57,7 @@ func main() {
 		"authority":    cmdAuthority,
 		"connector":    cmdConnector,
 		"reputation":   cmdReputation,
+		"robes":        cmdRobes,
 		"interfaces":   cmdInterfaces,
 		"gate":         cmdGate,
 		"version":      cmdVersion,
@@ -110,6 +111,8 @@ promotable changes on top of varvig.
               --happened true|false [--ref R] [--actual A] [--detail D]
                                     record what happened; the cell settles it
   varvig-factory reputation         each cell's derived record, best first
+  varvig-factory robes [--scope]    who wears what, derived; --scope prints what
+                                    this cell may do, which robes do not widen
   varvig-factory interfaces [list | publish --alias A --schema FILE]
                                     the interface registry
   varvig-factory version

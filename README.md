@@ -652,6 +652,119 @@ Every unmet rule is reported at once. Elsewhere an early exit saves an expensive
 re-verification; nothing here is expensive, and an operator about to spend money
 should see the whole list rather than one round trip per broken rule.
 
+## Robes carry no authority
+
+Capability = can do. Robe = responsible for. There are four — Ambassador,
+Provisioner, Procurement, Monitor — and the obvious implementation is the wrong
+one. A robe looks like a permission, and building it that way means a key per
+robe, a trust-store edit every time one moves, and a lifecycle to revoke one.
+
+It is a claim-policy input. What a cell may do comes from the single scope it
+was granted at enrolment, and that bundle is identical whether it wears
+everything or nothing. Check each robe and none needs more: Monitor only reads;
+Ambassador creates tickets, which any cell may propose; Procurement proposes
+Profiles, which is unprivileged; Provisioner acts, and what it needs is
+infrastructure credentials and a lease, not elevated repository rights.
+
+`robe.Grants` exists to be called rather than to be useful — its whole body is a
+nil return, and the conformance vector calls it for every combination of robes.
+The rule here is easiest to break by addition: each robe has an obvious thing it
+"should" be allowed to do, and granting it there looks like a small convenience.
+
+Robe assignment is a **derived projection** over the replicated capabilities
+objects. There is no registry, no tombstone and no cleanup job: a cell that
+stops publishing stops wearing anything. And no cell can give another a robe —
+that would be authoritative assignment, needing consensus this design does not
+build.
+
+### The provisioner is the one to be careful about
+
+A provisioned cell's ownership roots to the **owner**, never to the provisioner,
+and the assertion is on the key chain rather than on configuration. Configuration
+can say anything: a provisioner minting cells loyal to itself would write exactly
+the same config as one that did not. What differs is whether its key could have
+written the new cell's authority at all — so a provisioner is granted nothing
+that reaches another cell's namespace, and a compromised one forks the trust root
+only if somebody first handed it rights it has no reason to hold.
+
+### Resolution and procurement are different questions
+
+They divide on time, not on scope:
+
+| | Question | Availability |
+|---|---|---|
+| Resolution | which existing provider fits | always, answers now |
+| Procurement | what should we acquire | its own cadence, needs judgment |
+
+Resolution is a **library, not a service and not a robe**. It runs locally on
+every cell over replicated state, which is what makes it compatible with a flat
+factory: every cell computes the same answer from the same refs, so there is
+nothing to elect and nothing to be unavailable. Matching is on the interface
+hash, never the alias — two factories may use one alias for different
+interfaces, and a resolver that matched names would quietly pair a requirement
+with a provider implementing something else.
+
+**Resolution never blocks on procurement.** A cell that finds no provider
+proceeds or declines immediately. Waiting would make a deterministic local
+function depend on a robe that may not exist in this factory at all.
+
+Procurement spends money to create things that spend money, which is why it is
+build-order last and why its guardrails are refusals rather than advice. It
+**caps total cells, not only total spend**: a spend ceiling alone does not bound
+growth, because a factory can sit just under its ceiling while the number of
+things drawing on it climbs. The failure mode is drift nobody notices, and a
+count is the thing that notices. The cap is checked against the cells that exist
+now, including any a previous round created, so a factory cannot bootstrap past
+its ceiling by creating cells that create cells.
+
+And **procurement proposes; it never provisions.** `Procurement.Provision`
+exists and always errors, so the separation is legible in the code rather than
+only in prose — the same split drawn between the principal deciding to spend and
+the one executing.
+
+### Decision tasks
+
+The main loop calls no model. A decision task is the bounded exception: one
+inference call when deterministic policy genuinely cannot decide, down the
+ordinary executor path, recorded as an attempt. Wanting one every turn means the
+policy layer is underspecified, not that the cell needs intelligence.
+
+Four guardrails, and three of the four fail *open* — a broken one does not
+throw, it quietly lets a cell think more, or deeper, or with authority it never
+had:
+
+- **A separate budget line.** No meta line configured is a refusal, not a
+  fallback to the main one; an exhausted line means the cell decides
+  deterministically rather than borrowing from the budget meant for doing the
+  work.
+- **No nesting.** One level, hard stop. The recursion has no natural floor and
+  every level looks locally reasonable.
+- **An unreachable executor degrades to policy, never stalls.** Every question
+  names a fallback that is one of its own options, so a model that is down,
+  refuses, or answers something outside the options still leaves the cell able
+  to act.
+- **No authority.** A question carries no amount, no principal, no permission,
+  and its answers are a closed set policy already ruled in. An open answer would
+  let a model propose something nothing authorized.
+
+### External input is marked, never inferred
+
+An Ambassador turns an outside request into a ticket and marks it:
+
+```
+factory-origin: external
+```
+
+Its own directive rather than a key on `factory-requires:`, because it is not a
+requirement — a ticket asking for nothing in particular can still have arrived
+from outside, and that is exactly the one worth knowing about.
+
+Whether to act on the marking is an operator's call, so a cell can be configured
+to decline external work and by default is not. What is not optional is where
+the check runs: **above** the effectful split, so a cell that declines external
+work declines all of it. An external request that orders a physical thing is the
+case that matters most, not one to fall through to a different branch.
+
 ## Seams
 
 **Two seams, not four.** Everything hardware- or vendor-shaped lives behind them,
@@ -776,6 +889,11 @@ reputation/             per-cell standing, derived from what was promoted
 effect/                 effectful, non-regenerable capabilities — the refusals,
                         reserve/execute/settle over a reservation ref, and the
                         executor seam (with a refusing default and a counting fake)
+robe/                   responsibilities a cell wears, the projection that derives
+                        who wears what, resolution (which provider fits) and
+                        procurement (what to acquire) — none of it authority
+decide/                 the decision task: one bounded inference call when policy
+                        genuinely cannot decide, with its four guardrails
 claim/                  claim policy: should this cell attempt this ticket?
 loop/                   the ten-step cell loop, and verification of peer attempts
 gate/                   the wasm promotion-policy module interface
@@ -1168,6 +1286,26 @@ The authority model's numbered items live with the code they constrain, in
 | 14 | `Test14_ReservationExpiry` | an unsettled hold releases headroom on a timer — and never releases the key |
 | 15 | `Test15_NoSelfAuthorization` | a promote key is not a purchasing credential |
 | 16 | `Test16_InterfaceHashBinding` | alias-only references are refused; same alias, different hash does not match |
+| 24 | `Test24_UndeclaredCostRejected` | a capability with a cost and no cost model is refused as malformed, never run unmetered |
+| 25 | `Test25_FreeEffectfulCapability` | no cost model means no lease, and still irreversible |
+| 26 | `Test26_NonMonetaryCeilings` | an envelope bounds quantity and rate, not only spend |
+
+The rest sit with the behaviour they describe — the model-free loop in
+[`conformance/`](./conformance/conformance_test.go), robes and growth in
+[`robe/`](./robe/robe_test.go), decision tasks in
+[`decide/`](./decide/decide_test.go), external origin in
+[`claim/`](./claim/claim_test.go):
+
+| # | Test | What it holds |
+|---|---|---|
+| 17 | `Test17_ModelFreeLoop` | a cell with no model is first-class: it declines attempts and does everything else |
+| 18 | `Test18_DecisionTaskIsolation` | all four guardrails — separate line, no nesting, degrades to policy, no authority |
+| 19 | `Test19_ResolutionDeterminism` | every cell resolves the same providers, in the same order, from the same state |
+| 20 | `Test20_ProvisionedOwnership` | a provisioned cell roots to the owner — asserted on the key chain, not on configuration |
+| 20b | `Test20b_RobesCarryNoAuthority` | no robe, and no combination of them, widens what a cell may do |
+| 21 | `Test21_GrowthBound` | procurement cannot pass the cell cap or the envelope, including via cells that create cells |
+| 22 | `Test22_ExternallyOriginatedMarking` | the Ambassador's marking survives the round trip, is never inferred, and is read above the effectful split |
+| 23 | `Test23_NoBudgetFactory` | a factory with no budget configured works; absence is unenforced, not zero |
 
 Every numbered item in the spec's §9 is now covered.
 
@@ -1221,7 +1359,7 @@ The spec's §10, and what shipped for each step:
 | Step | Where |
 |---|---|
 | 1. Cell contract before any daemon code | `CELL.md`, `cell/` |
-| 2. Single-cell loop, gated only, one model + one sandbox adapter | `loop/`, `inference/`, `sandbox/` |
+| 2. Single-cell loop, gated only, one model + one sandbox adapter | `loop/`, `executor/` (then two packages, now one) |
 | 3. Micro profile with `roles: [verify, build]` | `profile.Micro`, `loop.verifyPeerAttempts` |
 | 4. Mini profile: attempting enabled, config only | `profile.Mini` |
 | 5. Budget enforcement and halt behaviour | `budget/` |
@@ -1233,6 +1371,12 @@ The spec's §10, and what shipped for each step:
 | 11. `autonomous`, per-path, gated on the conditions, kill switch tested first | `promote/`, §9.7 |
 | 12. Overseers, envelopes and leases | `authority/` |
 | 13. Effectful capabilities, reservations, idempotency | `effect/` |
+| 14. Freshness in promotion; the higher principal need not be human | `promote/`, `authority/` |
+| 15. One executor seam, properties rather than kinds | `executor/` |
+| 16. Robes, and the externally-originated marking | `robe/`, `cell.Robe`, `claim/` |
+| 17. Resolution: which existing provider fits | `robe/resolve.go` |
+| 18. Decision tasks | `decide/` |
+| 19. Procurement: what the factory should acquire | `robe/procure.go` |
 
 ## Known gaps
 
