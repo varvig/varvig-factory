@@ -534,18 +534,43 @@ order free.
 
 The vendor seam behind an effectful capability is `effect.Executor`, and it is
 deliberately not the `cell.Executor` above: that one performs work for a cell,
-this one reaches an outside world that charges money. The reason for a seam at
+this one causes something irreversible outside it. The reason for a seam at
 all is sharper here than anywhere else — the alternative to a fake is a real board
 order. Only
 a **refusing** executor exists so far — pointing a cell at it proves the wiring
 works, with the ticket claimed, quoted, authorized and reserved, and nothing
 ordered.
 
-**Vendors are connector peers, not compiled-in code.** Adding one by rebuilding
-the cell binary makes no sense, and it would put that vendor's credentials in the
-cell process. So a real capability is performed by a separate peer, modelled on
-how core does tracker bridges: it holds its own credentials, is untrusted, and
-runs anywhere.
+### A connector is an effect executor that lives somewhere else
+
+Worth stating plainly, because the word gets used as though it were a third
+concept and it is not. There are **two** kinds of executor in this design:
+
+| | Does | If it comes out wrong |
+|---|---|---|
+| `cell.Executor` | authors a change, runs a build, runs a test | run it again |
+| `effect.Executor` | a physical or billable outcome | there is nothing to undo |
+
+An `effect.Executor` can sit in either of two places, and that is a deployment
+choice rather than a second seam:
+
+| | Where the vendor code runs | How the cell reaches it |
+|---|---|---|
+| In-process | inside the cell binary | a direct call |
+| **Connector** | a separate peer process | repository state — the cell holds no executor for that capability at all |
+
+`loop/effectful.go` is literally that fork: if a connector serves the interface,
+the cell reserves, writes an offer and stops; otherwise it takes its own
+reservation and calls the executor. A connector is not a plugin, not a third
+seam, and not a kind of capability.
+
+**The deciding question is credentials, not physicality.** A capability whose
+work happens on this machine — a pin, an arm, a printer — has nothing to leak and
+is naturally in-process. One that reaches a service holding an account in your
+name should be a connector: compiling it in means a rebuild per vendor *and* that
+vendor's credentials in the cell process. That is why the connector shape is
+modelled on how core does tracker bridges — it holds its own credentials, is
+untrusted, and runs anywhere.
 
 ```
 cell       offers    a reservation naming a capability
@@ -796,7 +821,7 @@ idea:
 | | Does | If it goes wrong |
 |---|---|---|
 | `cell.Executor` | work *for* a cell — authors a change, runs a test | run it again |
-| `effect.Executor` | reaches an outside world that *charges money* | there is nothing to undo |
+| `effect.Executor` | a physical or billable outcome — anything *irreversible* | there is nothing to undo |
 
 That second row is the whole reason the `effect` package exists: the lease, the
 reservation, the higher principal, the refusal to speculate. A `cell.Executor`
@@ -974,7 +999,9 @@ iface/                  the interface registry: schemas as objects, resolvable b
 reputation/             per-cell standing, derived from what was promoted
 effect/                 effectful, non-regenerable capabilities — the refusals,
                         reserve/execute/settle over a reservation ref, and the
-                        executor seam (with a refusing default and a counting fake)
+                        effect.Executor seam in both its locations: in-process
+                        (a refusing default and a counting fake) and the
+                        connector exchange, where the executor is another process
 robe/                   responsibilities a cell wears, the projection that derives
                         who wears what, resolution (which provider fits) and
                         procurement (what to acquire) — none of it authority
@@ -1089,9 +1116,12 @@ skipped rather than reinterpreted.
 
 ## A connector is any process that can run the binary
 
+Which is the point of the shape: an effect executor that lives outside the cell
+(see [above](#a-connector-is-an-effect-executor-that-lives-somewhere-else)) needs
+no Go, no plugin ABI and no rebuild — only these three verbs.
+
 The connector protocol is repository state: the cell offers, a connector takes by
-compare-and-swap, executes, and reports; the cell settles. Three verbs make that
-reachable from outside this module.
+compare-and-swap, executes, and reports; the cell settles.
 
 ```sh
 varvig-factory connector awaiting --alias pcb-fabrication@1     # what could I serve?

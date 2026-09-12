@@ -12,14 +12,21 @@ import (
 // There are two seams in this module with a legitimate claim to the word:
 //
 //	cell.Executor      performs work FOR a cell — runs a model, runs a test
-//	effect.Executor    reaches an outside world that CHARGES money (§8.2)
+//	effect.Executor    causes something IRREVERSIBLE outside it (§8.2)
 //
-// They are not variations on one idea. Work done by a cell.Executor is
-// regenerable: if it comes out wrong, run it again. Work done by an
-// effect.Executor is irreversible, which is why it needs a lease, a
-// reservation, a higher principal's authorization, and every refusal in
-// `effect`. Two types named Executor in one module is a thing a reader trips
-// over exactly once, and they should not have to.
+// They are not variations on one idea, and the line between them is
+// reversibility rather than cost. Work done by a cell.Executor is regenerable:
+// if it comes out wrong, run it again. Work done by an effect.Executor cannot
+// be taken back — which is why it needs a reservation, a higher principal's
+// authorization, and every refusal in `effect`, whether or not it costs
+// anything. Effectful and expensive are orthogonal (§8.0): turning on a light
+// is free and still irreversible, so it is bounded by the envelope's quantity
+// and rate ceilings instead of by a lease.
+//
+// Two types named Executor in one module is a thing a reader trips over exactly
+// once, and they should not have to. Note also that an effect executor may run
+// inside the cell or in a separate connector peer; that is a deployment choice
+// within the effect seam, not a third kind of executor.
 //
 // Putting the interface here also puts it where its obligations already live:
 // what it returns is a Fragment (§4.2), what it must not do is guess one, and
