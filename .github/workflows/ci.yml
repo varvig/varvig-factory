@@ -81,6 +81,14 @@ jobs:
       - name: conformance (spec §9.10-9.16, §9.24-9.26, authority and effects)
         run: go test -v -run 'Test[0-9]+[a-d]?_' ./authority/ ./effect/
 
+      # Same reasoning, one step further out: §9.18-9.22 are about robes,
+      # resolution, growth and where external input enters, and they live with
+      # those packages. Listed explicitly rather than run over ./... so that a
+      # vector moving to a package nobody added here fails loudly instead of
+      # silently not running.
+      - name: conformance (spec §9.18-9.22, robes, decisions and origin)
+        run: go test -v -run 'Test[0-9]+[a-d]?_' ./robe/ ./decide/ ./claim/
+
       # The guards, likewise separate. A failure here means the code has grown
       # something the design forbids — a second scheduler, a branch on cell class,
       # or a dependency — and the failure message says which.

@@ -68,6 +68,24 @@ type Requirements struct {
 	// ambiguous between factories (§2.1), and here the ambiguity would be
 	// resolved by spending money.
 	Effect *EffectRequirement
+	// ExternallyOriginated marks a ticket an Ambassador created from an outside
+	// request (§5b.3). It is the prompt-injection surface made visible: the
+	// ticket body is untrusted input that reached the factory from somewhere
+	// nobody here controls, and scoping limits the blast radius without
+	// eliminating the problem.
+	//
+	// The marking does not refuse anything by itself. It is a claim-policy
+	// input, so an operator decides whether this cell treats such tickets
+	// differently — and a factory that wants a human to see every external
+	// request before a cell touches it can say so in one setting rather than by
+	// inspecting ticket bodies.
+	//
+	// Absent means internal, which is the safe default in the direction that
+	// matters: a ticket nobody marked is treated as ordinary work, and the
+	// mistake worth preventing is an external one that *looks* ordinary. That
+	// is why the Ambassador marking it is an obligation of the robe rather than
+	// something inferred here.
+	ExternallyOriginated bool
 }
 
 // EffectRequirement is a ticket's declared effectful action.
@@ -103,6 +121,19 @@ type EffectGrant struct {
 
 // Directive is the line prefix that carries requirements.
 const Directive = "factory-requires:"
+
+// OriginDirective marks where a ticket came from (§5b.3):
+//
+//	factory-origin: external
+//
+// Its own directive rather than a key on factory-requires, because it is not a
+// requirement: a ticket with no build, test or effect requirement at all can
+// still have arrived from outside, and that is exactly the ticket worth
+// knowing about.
+const OriginDirective = "factory-origin:"
+
+// OriginExternal is the value that marks a ticket externally originated.
+const OriginExternal = "external"
 
 // ParseRequirements reads the directive from a spec. Unknown keys are ignored
 // rather than rejected: a ticket written for a newer Factory must still be
@@ -144,6 +175,16 @@ func ParseRequirements(spec string) Requirements {
 			}
 		}
 	}
+	for _, line := range strings.Split(spec, "\n") {
+		rest, ok := cutPrefixFold(strings.TrimSpace(line), OriginDirective)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(rest), OriginExternal) {
+			r.ExternallyOriginated = true
+		}
+	}
+
 	sort.Strings(r.Build)
 	sort.Strings(r.Test)
 
@@ -259,6 +300,15 @@ type Inputs struct {
 	// attempting it against a runtime nobody confirmed.
 	ExecutorReachable bool
 	ExecutorReason    string
+	// DeclineExternallyOriginated makes this cell skip tickets an Ambassador
+	// marked as coming from outside (§9.22).
+	//
+	// A policy input rather than a rule, because which cells may act on
+	// external requests is an operator's decision and not this function's: a
+	// factory may want every external ticket seen by a person first, or may
+	// want one hardened cell taking them, or may not care. What claim policy
+	// guarantees is only that the marking is *available* to decide on.
+	DeclineExternallyOriginated bool
 	// OwnAttempts is how many attempts this cell has already made at this task.
 	OwnAttempts int
 	// MaxAttemptsPerCell caps repeat attempts by this cell at this task. Zero
@@ -329,6 +379,13 @@ const (
 	// SkipNoAuthority: this cell holds no lease, or no executor, for the
 	// capability the ticket needs.
 	SkipNoAuthority SkipReason = "no authority for this effectful capability"
+	// SkipExternallyOriginated: the ticket came from outside through an
+	// Ambassador and this cell is configured not to take such work
+	// unsupervised. It is its own reason rather than folded into SkipVetoed
+	// because nothing is wrong with the ticket — the operator has decided where
+	// external requests get looked at, and a reason that said "vetoed" would
+	// send them looking for a veto that does not exist.
+	SkipExternallyOriginated SkipReason = "externally originated"
 	// SkipNoExecutor: this cell attempts, and the executor that would do the
 	// authoring is not reachable right now.
 	//
@@ -348,6 +405,16 @@ const (
 // attempt this ticket — which is the reason an operator can act on.
 func Evaluate(in Inputs) Verdict {
 	req := in.Ticket.Requirements()
+
+	// Where the ticket came from is asked before anything else, and above the
+	// effectful split deliberately: an external request that orders a physical
+	// thing is the case that matters *most*, not one to fall through to a
+	// different branch. A cell that declines external work declines all of it.
+	if in.DeclineExternallyOriginated && req.ExternallyOriginated {
+		return Verdict{Skip: SkipExternallyOriginated, Reason: fmt.Sprintf(
+			"%s was created from an external request and this cell does not take those unsupervised",
+			shortID(in.Ticket.ID))}
+	}
 
 	// An effectful ticket is not attempted, so the attempt role does not gate it.
 	// What gates it is holding a lease — authority to spend, not a declared

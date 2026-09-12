@@ -1,6 +1,6 @@
 # The Cell Contract
 
-*Normative. Version 9* — folds the model-runtime and build-sandbox adapters into one executor seam (§6), separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
+*Normative. Version 10* — adds robes and the responsibilities that carry no authority (§3.4), externally-originated tickets (§3.5) and decision tasks (§5.1); folds the model-runtime and build-sandbox adapters into one executor seam (§6), separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
 effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
@@ -205,7 +205,8 @@ here.
   },
   "build": ["go", "flutter", "android"],
   "test":  ["unit", "integration", "large-memory"],
-  "roles": ["attempt", "verify", "build"]
+  "roles": ["attempt", "verify", "build"],
+  "robes": ["monitor"]
 }
 ```
 
@@ -217,6 +218,7 @@ here.
 | `build`, `test` | Sorted, deduplicated capability tokens. Free-form, matched by equality against a ticket's requirements. |
 | `roles` | A non-empty subset of `attempt`, `verify`, `build`, sorted. |
 | `effects` | Effectful capabilities this cell has an integration for (§8.2). Each names an alias **and** its interface hash. Optional, and absent for almost every cell. |
+| `robes` | Responsibilities this cell wears (§3.4), sorted and deduplicated. A fixed set: `ambassador`, `monitor`, `procurement`, `provisioner`. Optional; a cell with none is an ordinary member. |
 
 `effects` is **not** authority to spend — that is a lease, which an overseer
 writes and a cell cannot. It says only that this cell has an integration wired
@@ -270,6 +272,78 @@ runtime returns, with no restart.
 
 Encoding is canonical JSON as defined in §4.3, so two cells configured
 identically publish byte-identical capabilities.
+
+---
+
+### 3.4 Robes carry no authority
+
+Capability = can do. Robe = responsible for. A robe is a **claim-policy input**,
+not a permission, and the obvious implementation — a key per robe, a trust-store
+edit whenever one moves, a lifecycle to revoke one — is the wrong one.
+
+Check each against what it actually needs and none of them needs anything more
+than an ordinary cell has:
+
+| Robe | What it does | What it needs |
+|---|---|---|
+| `monitor` | Observes and reports. Never a source of truth, never decides. | Read, which every cell has. |
+| `ambassador` | Where untrusted input enters. Turns outside requests into tickets. | Propose, which every cell has. |
+| `procurement` | Decides what capability the factory should acquire; proposes, never provisions. | Propose. |
+| `provisioner` | Instantiates cells from a Blueprint. | Infrastructure credentials and a lease — **not** elevated repository rights. |
+
+Two consequences follow and both are load-bearing.
+
+**Robe assignment is a derived projection.** Every cell reads the replicated
+capabilities objects and computes who wears what locally. There is no registry
+to keep in step, no tombstone when a cell goes, and no cleanup job: a cell that
+stops publishing stops wearing anything. State that can be derived needs no
+lifecycle.
+
+**A compromised cell key reaches its own namespace whatever it claims to wear.**
+What a cell may do comes from the one scope granted at enrolment — write its own
+`refs/factory/cells/<cell-id>/*`, read its own lease, read the rest of the
+coordination repository — and that bundle is identical for a cell wearing every
+robe and a cell wearing none.
+
+The provisioner is where this matters most, and the check is on the key chain
+rather than on configuration. A provisioned cell's ownership roots to the
+**owner**, never to the provisioner, and the way to be sure is not a field
+saying so: a provisioner that could write another cell's authority would, if
+compromised, mint cells loyal to itself, and every one would look legitimate. So
+a provisioner is granted nothing that reaches another cell's namespace, and
+wearing the robe does not change that.
+
+No cell can give another cell a robe. A cell wears what its own configuration
+says it wears; pushing one onto a peer would be authoritative assignment, which
+needs consensus this design deliberately does not build.
+
+---
+
+### 3.5 Externally-originated tickets
+
+A ticket an Ambassador created from an outside request carries a directive
+saying so:
+
+```
+factory-origin: external
+```
+
+Its own directive rather than a key on `factory-requires:`, because it is not a
+requirement — a ticket asking for nothing in particular can still have arrived
+from outside, and that is exactly the ticket worth knowing about.
+
+This is the prompt-injection surface, and the marking is the only thing that
+makes it visible downstream. It is an **obligation of the robe**: nothing can
+infer it, so an Ambassador that fails to mark a ticket produces one
+indistinguishable from work the factory set itself.
+
+What a cell does with the marking is an operator's decision, not this contract's.
+A factory may want a person to see every external request first; another may run
+them like any other work. So claim policy can filter on it and by default does
+not. The one rule is that the check runs **above** the effectful split: a cell
+that declines external work declines all of it, because an external request that
+orders a physical thing is the case that matters most, not one to fall through
+to a different branch.
 
 ---
 
@@ -404,6 +478,35 @@ Three rules, and they are the whole protocol:
 Because claims are per-cell refs, two cells never contend for the same ref name.
 The CAS that matters is varvig's on the *attempt* and on the promoted branch,
 where it fails safely rather than overwriting.
+
+### 5.1 Decision tasks
+
+The main loop calls no model (§10.1). A **decision task** is the bounded
+exception: what a cell submits when deterministic policy genuinely cannot
+decide, as one inference call down the ordinary executor path, recorded as an
+attempt so the claim can be audited later.
+
+Wanting one every turn is a signal the policy layer is underspecified, not a
+reason to add intelligence. Four guardrails, each enforced rather than
+documented, and three of the four fail *open* — a broken one does not throw, it
+quietly lets a cell think more, or deeper, or with authority it was never given:
+
+1. **A separate budget line.** Otherwise deciding consumes the lease meant for
+   doing, invisibly, because it looks like ordinary spend. A cell that thought
+   its way through its whole budget would have nothing left to think *about*. No
+   meta line configured is a refusal, never a fallback to the main one.
+2. **No nesting.** A decision task cannot spawn a decision task. One level, hard
+   stop — the recursion has no natural floor and every level looks locally
+   reasonable.
+3. **An unreachable executor degrades to policy, never stalls.** Policy must
+   always suffice to at least safely do nothing. A question therefore names a
+   fallback that is one of its own options, and an executor that is down,
+   refuses, or answers something outside those options produces that fallback.
+4. **No authority.** A decision informs a choice within already-granted bounds.
+   A question carries no amount, no principal and no permission, and its answers
+   are a closed set policy has already ruled in — an open answer would let a
+   model propose something nothing authorized. Break this and §8.2's separation
+   collapses into a cell authorizing its own spending by thinking harder.
 
 ---
 
@@ -1090,6 +1193,19 @@ rationale.
 18. **No cost model read off a request** (§8.2). A ticket names what to do; an
     operator's configuration says what doing it costs. The other direction lets
     a ticket declare a board order free.
+19. **No authority attached to a robe** (§3.4). A robe is a claim-policy input.
+    Granting one the rights it obviously "should" have looks like a small
+    convenience and is a design change: it reintroduces a key per robe, a
+    trust-store edit whenever one moves, and a lifecycle to revoke one.
+20. **No robe assigned by another cell** (§3.4). A cell wears what its own
+    configuration says. Pushing a robe onto a peer is authoritative assignment
+    and needs consensus this design does not build.
+21. **No external origin inferred** (§3.5). A ticket is externally originated
+    only because an Ambassador marked it. Guessing would decline ordinary work
+    at random; guessing the other way is worse.
+22. **No decision task inside a decision task, and none on the main budget
+    line** (§5.1). Both failures are silent: the first recurses with every level
+    looking reasonable, the second spends the budget meant for doing the work.
 
 ---
 

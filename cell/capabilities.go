@@ -71,6 +71,75 @@ type Capabilities struct {
 	// It is a static fact, so it belongs here: which integrations a cell has is
 	// changed by an operator editing configuration, never by the cell itself.
 	Effects []EffectCapability `json:"effects,omitempty"`
+	// Robes are the responsibilities this cell instance wears (§5b.3).
+	//
+	// They belong here for the same reason roles do — an operator changes them,
+	// the cell never does — and they are **not** authority. A robe makes a cell
+	// inclined to do certain work; what it may do comes from its one enrolment
+	// scope and nothing else. There is no key per robe and no trust-store edit
+	// when robes change, which is what lets them be a derived projection rather
+	// than a lifecycle.
+	Robes []Robe `json:"robes,omitempty"`
+}
+
+// Robe is a responsibility a cell instance wears, temporarily or permanently.
+//
+// Capability = can do. Robe = responsible for. A cell may wear several, and a
+// factory where nobody wears a given robe is a factory that does not do that
+// thing — which for Procurement means a fully functional factory that simply
+// does not grow (§5b.2).
+//
+// **Robes carry no authority.** Check each: Monitor only reads; Ambassador
+// creates tickets, which any cell may propose; Procurement proposes Profiles,
+// which is unprivileged; Provisioner is the only one that acts, and what it
+// needs is infrastructure credentials and a lease, not elevated repository
+// rights. A robe is a claim-policy input, not a permission.
+type Robe string
+
+// The robes (§5b.3).
+const (
+	// RobeAmbassador is where untrusted input enters. Tickets it creates from
+	// external requests must be marked externally-originated so claim policy
+	// can treat them differently — this is the prompt-injection surface, and
+	// the marking is the only thing that makes it visible downstream.
+	RobeAmbassador Robe = "ambassador"
+	// RobeProvisioner instantiates cells from a Blueprint. A provisioned cell's
+	// ownership roots to the **owner**, never to the provisioner: otherwise a
+	// compromised provisioner mints cells loyal to itself and the trust root
+	// forks.
+	RobeProvisioner Robe = "provisioner"
+	// RobeProcurement decides what capability the factory should acquire. It
+	// proposes and never provisions — the same separation §8.2 draws between
+	// the principal deciding to spend and the one executing.
+	RobeProcurement Robe = "procurement"
+	// RobeMonitor strictly observes and reports. Never a source of truth, never
+	// decides, which is what keeps liveness out of the DAG.
+	RobeMonitor Robe = "monitor"
+)
+
+// Robes is every robe, sorted, for validation and for a CLI that lists them.
+func Robes() []Robe {
+	return []Robe{RobeAmbassador, RobeMonitor, RobeProcurement, RobeProvisioner}
+}
+
+// Valid reports whether r is a robe this contract defines.
+func (r Robe) Valid() bool {
+	for _, known := range Robes() {
+		if r == known {
+			return true
+		}
+	}
+	return false
+}
+
+// Wears reports whether this cell wears a robe.
+func (c Capabilities) Wears(r Robe) bool {
+	for _, worn := range c.Robes {
+		if worn == r {
+			return true
+		}
+	}
+	return false
 }
 
 // CostModel says how an effectful capability's price is known, and whether it
@@ -129,6 +198,15 @@ func (c *Capabilities) Normalize() {
 	c.Build = sortDedup(c.Build)
 	c.Test = sortDedup(c.Test)
 
+	robes := make([]string, 0, len(c.Robes))
+	for _, r := range c.Robes {
+		robes = append(robes, string(r))
+	}
+	c.Robes = nil
+	for _, r := range sortDedup(robes) {
+		c.Robes = append(c.Robes, Robe(r))
+	}
+
 	roles := make([]string, 0, len(c.Roles))
 	for _, r := range c.Roles {
 		roles = append(roles, string(r))
@@ -183,6 +261,11 @@ func (c Capabilities) Validate() error {
 		case RoleAttempt, RoleVerify, RoleBuild:
 		default:
 			return fmt.Errorf("cell: unknown role %q", r)
+		}
+	}
+	for _, r := range c.Robes {
+		if !r.Valid() {
+			return fmt.Errorf("cell: unknown robe %q; robes are a fixed set because an unknown one is a claim-policy input nothing reads", r)
 		}
 	}
 	// A cell that will author code needs a model to author it with. Catching

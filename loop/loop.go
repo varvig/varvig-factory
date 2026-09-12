@@ -124,6 +124,10 @@ type Cell struct {
 	Baselines map[string]cell.Environment
 	// YieldToFreshClaims is claim.Inputs.YieldToFreshClaims.
 	YieldToFreshClaims bool
+	// DeclineExternallyOriginated is claim.Inputs.DeclineExternallyOriginated:
+	// this cell does not take tickets an Ambassador created from an outside
+	// request (§5b.3).
+	DeclineExternallyOriginated bool
 	// MaxAttemptsPerCell caps repeat attempts by this cell at one task.
 	MaxAttemptsPerCell int
 
@@ -445,6 +449,8 @@ func (c *Cell) Once(ctx context.Context) (Report, error) {
 			Offline:            rep.Offline,
 			YieldToFreshClaims: c.YieldToFreshClaims,
 			Now:                c.now(),
+
+			DeclineExternallyOriginated: c.DeclineExternallyOriginated,
 		})
 		if !verdict.Claim {
 			rep.Skipped[verdict.Skip]++

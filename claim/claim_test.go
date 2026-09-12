@@ -463,3 +463,76 @@ func TestOrdinaryTicketsAreUnaffected(t *testing.T) {
 		t.Fatalf("an ordinary ticket was refused: %s", v.Reason)
 	}
 }
+
+// Test22_ExternallyOriginatedMarking is §9.22: a ticket an Ambassador created
+// from an outside request carries that fact, and claim policy can act on it.
+//
+// The marking is an obligation of the robe, not a property claim policy can
+// infer, and that asymmetry is the whole risk: an Ambassador that forgot to mark
+// a ticket produces one that is indistinguishable from work the factory set
+// itself. So what is tested here is not that external tickets are refused —
+// whether to refuse them is an operator's call — but that the fact survives the
+// round trip through the spec and reaches the decision unchanged.
+func Test22_ExternallyOriginatedMarking(t *testing.T) {
+	external := "Ship the thing.\n" + OriginDirective + " " + OriginExternal + "\n"
+
+	req := ParseRequirements(external)
+	if !req.ExternallyOriginated {
+		t.Fatal("an Ambassador-marked ticket parsed as ordinary internal work")
+	}
+	// Its own directive, so a ticket carrying no requirement at all still
+	// carries its origin. A ticket asking for nothing in particular is exactly
+	// the external one that would otherwise look like housekeeping.
+	if len(req.Build) != 0 || len(req.Test) != 0 || req.Effect != nil {
+		t.Fatalf("the origin directive leaked into requirements: %+v", req)
+	}
+
+	// A cell that takes external work is unaffected — the marking is
+	// information, not a veto.
+	in := baseInputs()
+	in.Ticket.Spec = external
+	if v := Evaluate(in); !v.Claim {
+		t.Fatalf("a cell that accepts external work declined one anyway: %s", v.Reason)
+	}
+
+	// A cell configured to decline it skips, and says so specifically enough
+	// that an operator can tell "nobody is looking at external requests" from
+	// "this ticket was rejected".
+	in.DeclineExternallyOriginated = true
+	v := Evaluate(in)
+	if v.Claim || v.Skip != SkipExternallyOriginated {
+		t.Fatalf("verdict = %+v, want an externally-originated skip", v)
+	}
+	if !strings.Contains(v.Reason, "external") {
+		t.Fatalf("the reason does not name the origin: %s", v.Reason)
+	}
+
+	// Declining external work declines all of it, including the effectful case.
+	// Reading the effectful branch first would leave the request that orders a
+	// physical thing — the one that matters most — governed by a different rule
+	// than the request that edits a file.
+	eff := effectInputs(OriginDirective+" "+OriginExternal+"\n"+effectSpec(""), boardGrant)
+	if v := Evaluate(eff); !v.Claim {
+		t.Fatalf("the effectful external fixture is refused for some other reason: %+v", v)
+	}
+	eff.DeclineExternallyOriginated = true
+	if v := Evaluate(eff); v.Claim || v.Skip != SkipExternallyOriginated {
+		t.Fatalf("an effectful external ticket took a different branch: %+v", v)
+	}
+
+	// The directive's *value* is what marks it, not its presence. A ticket
+	// saying where it came from and saying "not outside" is the case a check
+	// that only looked for the line would get exactly backwards.
+	if ParseRequirements("Do it.\n" + OriginDirective + " internal\n").ExternallyOriginated {
+		t.Fatal("a ticket marked as internally originated parsed as external")
+	}
+
+	// And an unmarked ticket is never inferred to be external. The failure
+	// nobody would notice is the opposite of this one, so it is worth pinning:
+	// policy that guessed would decline ordinary work at random.
+	plain := baseInputs()
+	plain.DeclineExternallyOriginated = true
+	if v := Evaluate(plain); !v.Claim {
+		t.Fatalf("an unmarked ticket was treated as external: %s", v.Reason)
+	}
+}

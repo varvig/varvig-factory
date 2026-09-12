@@ -218,6 +218,19 @@ type Config struct {
 	Build []string    `json:"build,omitempty"`
 	Test  []string    `json:"test,omitempty"`
 
+	// Robes are the responsibilities this cell wears (FACTORY.md §5b.3).
+	//
+	// Configuration, because a cell wears what it says it wears and no cell can
+	// give another one a robe — pushing a robe onto a peer would be
+	// authoritative assignment, which needs consensus this design does not
+	// build. Every other cell reads this from the replicated capabilities
+	// object and derives the projection locally.
+	//
+	// Setting one grants nothing. A robe is a claim-policy input; what a cell
+	// may do comes from the single scope it was granted at enrolment, which is
+	// the same bundle whether it wears everything or nothing.
+	Robes []cell.Robe `json:"robes,omitempty"`
+
 	Inference InferenceConfig `json:"inference"`
 	Sandbox   SandboxConfig   `json:"sandbox"`
 	Artifacts ArtifactConfig  `json:"artifacts"`
@@ -242,6 +255,14 @@ type Config struct {
 	YieldToFreshClaims bool `json:"yield_to_fresh_claims,omitempty"`
 	// MaxAttemptsPerCell caps repeat attempts by this cell at one task.
 	MaxAttemptsPerCell int `json:"max_attempts_per_cell,omitempty"`
+	// DeclineExternallyOriginated skips tickets an Ambassador created from an
+	// outside request (§5b.3).
+	//
+	// Off by default, which is the only honest default: whether external work
+	// needs a person to look at it first is an operator's judgment about their
+	// factory, and a Factory that decided for them would either block work
+	// nobody wanted blocked or wave through work somebody did.
+	DeclineExternallyOriginated bool `json:"decline_externally_originated,omitempty"`
 
 	// Effects configures effectful capabilities (§6.7). Absent is the normal
 	// case: a cell that builds and tests code has no business holding a
@@ -473,6 +494,7 @@ func (c Config) Capabilities() cell.Capabilities {
 		Build:  c.Build,
 		Test:   c.Test,
 		Roles:  c.Roles,
+		Robes:  c.Robes,
 		Inference: cell.Inference{
 			Tier: c.Inference.Tier,
 		},
@@ -696,11 +718,13 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		Baselines:          c.Promotion.Baselines,
 		YieldToFreshClaims: c.YieldToFreshClaims,
 		MaxAttemptsPerCell: c.MaxAttemptsPerCell,
-		MaxTrustAge:        authority.MaxAge(c.Promotion.MaxTrustAge.D(0)),
-		Executors:          executors,
-		Connectors:         c.connectorCapabilities(),
-		EffectAuthorizedBy: c.Effects.AuthorizedBy,
-		EffectTTL:          int64(c.Effects.TTL.D(0) / time.Second),
+
+		DeclineExternallyOriginated: c.DeclineExternallyOriginated,
+		MaxTrustAge:                 authority.MaxAge(c.Promotion.MaxTrustAge.D(0)),
+		Executors:                   executors,
+		Connectors:                  c.connectorCapabilities(),
+		EffectAuthorizedBy:          c.Effects.AuthorizedBy,
+		EffectTTL:                   int64(c.Effects.TTL.D(0) / time.Second),
 	}
 	cl.Promoter = &promote.Promoter{
 		Project:     project,
