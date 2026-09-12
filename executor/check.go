@@ -133,12 +133,12 @@ func (e *Exec) Name() string {
 	return "subprocess"
 }
 
-// Properties implements Executor. A build and test runner is **deterministic**
+// Properties implements cell.Executor. A build and test runner is **deterministic**
 // — its results are evidence-comparable and cacheable, which is what lets one
 // cell's evidence license another cell's attempt (§6.3.1) — and it spends no
 // budget: compute a cell already owns is not a lease.
-func (e *Exec) Properties() Properties {
-	return Properties{Deterministic: true}
+func (e *Exec) Properties() cell.ExecutorProperties {
+	return cell.ExecutorProperties{Deterministic: true}
 }
 
 // Fragment implements Checking. It runs every probe once and caches the result:
@@ -162,18 +162,18 @@ func (e *Exec) probeAll(ctx context.Context) (cell.Fragment, error) {
 	sort.Slice(probes, func(i, j int) bool { return probes[i].Key < probes[j].Key })
 	for _, p := range probes {
 		if p.Key == "" || len(p.Command) == 0 {
-			return cell.Fragment{}, fmt.Errorf("%w: malformed probe %+v", ErrIndescribable, p)
+			return cell.Fragment{}, fmt.Errorf("%w: malformed probe %+v", cell.ErrIndescribable, p)
 		}
 		out, err := e.capture(ctx, "", p.Command)
 		if err != nil {
-			return cell.Fragment{}, fmt.Errorf("%w: probe %q: %v", ErrIndescribable, p.Key, err)
+			return cell.Fragment{}, fmt.Errorf("%w: probe %q: %v", cell.ErrIndescribable, p.Key, err)
 		}
 		v := firstLine(out)
 		if p.Extract != nil {
 			v = strings.TrimSpace(p.Extract(v))
 		}
 		if v == "" {
-			return cell.Fragment{}, fmt.Errorf("%w: probe %q produced no version", ErrIndescribable, p.Key)
+			return cell.Fragment{}, fmt.Errorf("%w: probe %q produced no version", cell.ErrIndescribable, p.Key)
 		}
 		toolchains[p.Key] = v
 	}

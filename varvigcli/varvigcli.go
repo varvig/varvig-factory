@@ -34,6 +34,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -152,6 +153,16 @@ type TaskRequest struct {
 type Task struct {
 	ID  string
 	Dir string
+	// Socket is the task's MCP socket, which core's daemon serves for the life
+	// of the task. It is the tool channel of FACTORY.md §4.2 — the line between
+	// thinking and doing — and it is scoped and propose-only exactly like the
+	// credential it belongs to.
+	//
+	// **Empty when no daemon is running**, which is normal and not an error: a
+	// cell whose executors do not take tools never needs one. An executor that
+	// declares ToolsAttached and is handed no socket is a degraded cell, and
+	// the loop says so rather than running it toolless and silently.
+	Socket string
 }
 
 // HookResult is one wasm module run, from `varvig hook run`. ExitCode is the
@@ -267,6 +278,14 @@ type Varvig interface {
 	TaskStop(id string) error
 	// Commit commits a working directory, returning the change hash.
 	Commit(dir, message string) (string, error)
+	// Changed lists the paths a working directory has altered against its base,
+	// sorted. An empty result means the tree is clean.
+	//
+	// Needed because `varvig commit` on a clean tree succeeds and records an
+	// empty change. For an executor that edits in place there is no other way to
+	// tell "the harness did nothing" from "the harness did something", and
+	// committing either way would fill the pool with empty candidates.
+	Changed(dir string) ([]string, error)
 
 	// SpecAdd records a speculation candidate for a task.
 	SpecAdd(task, change string) error
@@ -693,7 +712,8 @@ func parseNotes(out string) []Note {
 	return notes
 }
 
-// TaskStart implements Varvig. Format: the first line is "task <id>".
+// TaskStart implements Varvig. The first line is "task <id>"; an indented
+// "socket <path>" line follows when a daemon minted the task.
 func (e Exec) TaskStart(req TaskRequest) (Task, error) {
 	args := []string{"task", "start"}
 	if req.Scope != "" {
@@ -725,7 +745,61 @@ func (e Exec) TaskStart(req TaskRequest) (Task, error) {
 	if !filepath.IsAbs(dir) {
 		dir = filepath.Join(e.Dir, dir)
 	}
-	return Task{ID: id, Dir: dir}, nil
+	return Task{ID: id, Dir: dir, Socket: parseSocket(out)}, nil
+}
+
+// parseSocket reads the per-task MCP socket from `task start` output.
+//
+// Absent is the normal no-daemon case and returns empty rather than failing:
+// minting the task succeeded, and a cell whose executors take no tools has lost
+// nothing. Only an executor that asked for a tool channel cares, and the loop
+// is where that turns into a complaint.
+func parseSocket(out string) string {
+	for _, line := range strings.Split(out, "\n") {
+		rest, ok := strings.CutPrefix(strings.TrimSpace(line), "socket")
+		if !ok {
+			continue
+		}
+		// The "connect varvig mcp --connect <path>" line below it names the
+		// same path inside a command; this prefix match would take that too if
+		// the lines were reordered, so require the bare-path shape.
+		if p := strings.TrimSpace(rest); p != "" && !strings.Contains(p, " ") {
+			return p
+		}
+	}
+	return ""
+}
+
+// Changed implements Varvig. Format, one path per line:
+//
+//	added     src/new.go
+//	modified  a.txt
+//
+// A clean tree prints "clean (working tree matches base)" and yields nothing.
+//
+// Porcelain, because `varvig status` has no JSON form. That makes an
+// integration test against the real binary the only thing that can catch core
+// changing the shape, which is why there is one.
+func (e Exec) Changed(dir string) ([]string, error) {
+	out, err := e.runIn(dir, nil, "status")
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		// A status line is "<state> <path>". Anything else — the clean
+		// sentence, a blank line, a note — is not one.
+		if len(fields) != 2 {
+			continue
+		}
+		switch fields[0] {
+		case "added", "modified", "deleted":
+			paths = append(paths, fields[1])
+		}
+	}
+	sort.Strings(paths)
+	return paths, nil
 }
 
 // TaskStop implements Varvig.

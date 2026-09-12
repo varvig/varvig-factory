@@ -43,11 +43,11 @@ type Command struct {
 // Name implements Authoring.
 func (c *Command) Name() string { return "command" }
 
-// Properties implements Executor. One model call per request, no tool channel,
+// Properties implements cell.Executor. One model call per request, no tool channel,
 // and not deterministic — a model is the thing a transaction must never re-run
 // (§4.4). It spends budget, which is what makes it the ConsumesLease case.
-func (c *Command) Properties() Properties {
-	return Properties{ConsumesLease: true}
+func (c *Command) Properties() cell.ExecutorProperties {
+	return cell.ExecutorProperties{ConsumesLease: true}
 }
 
 // Fragment implements Authoring by running VersionArgs once and caching the
@@ -65,11 +65,11 @@ func (c *Command) probe(ctx context.Context) (cell.Fragment, error) {
 		return cell.Fragment{}, fmt.Errorf("inference: command runtime has no model configured")
 	}
 	if len(c.VersionArgs) == 0 {
-		return cell.Fragment{}, fmt.Errorf("%w: no version_args configured for %s", ErrIndescribable, c.Path)
+		return cell.Fragment{}, fmt.Errorf("%w: no version_args configured for %s", cell.ErrIndescribable, c.Path)
 	}
 	out, err := probeVersion(ctx, c.Path, c.VersionArgs, c.Env)
 	if err != nil {
-		return cell.Fragment{}, fmt.Errorf("%w: %v", ErrIndescribable, err)
+		return cell.Fragment{}, fmt.Errorf("%w: %v", cell.ErrIndescribable, err)
 	}
 	return cell.Fragment{
 		Toolchains: map[string]string{"inference-runtime": out},

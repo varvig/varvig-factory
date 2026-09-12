@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/varvig/varvig-factory/cell"
 )
@@ -357,5 +358,132 @@ func TestIntegrationRankMatchesTheParser(t *testing.T) {
 	}
 	if !sawDetail {
 		t.Fatal("no ranking carried core's feature detail; the format has drifted")
+	}
+}
+
+// TestIntegrationChangedMatchesTheStatusPorcelain pins `varvig status`'s shape.
+//
+// Changed exists because `varvig commit` on a clean tree succeeds and records an
+// empty change, so for an executor that edits in place there is no other way to
+// tell "the harness did nothing" from "the harness did something". That makes
+// this parser load-bearing for whether empty candidates reach the speculation
+// pool — and status has no JSON form, so an integration test against the real
+// binary is the only thing that can catch core changing the wording.
+func TestIntegrationChangedMatchesTheStatusPorcelain(t *testing.T) {
+	e := varvigRepo(t)
+
+	if err := os.MkdirAll(filepath.Join(e.Dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(e.Dir, path), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// No staging step: varvig commits the working tree.
+	write("src/a.go", "package src\n")
+	if _, err := e.Commit(e.Dir, "base"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A clean tree changed nothing. Core says so in a sentence rather than with
+	// an empty listing, which is exactly the shape a naive line parser would
+	// return as one bogus path.
+	changed, err := e.Changed(e.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 0 {
+		t.Fatalf("a clean tree reported %v as changed", changed)
+	}
+
+	// An added file and a modified one, which are two different status words.
+	write("src/a.go", "package src\n\nfunc Edited() {}\n")
+	write("src/b.go", "package src\n")
+	changed, err = e.Changed(e.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(changed, ",") != "src/a.go,src/b.go" {
+		t.Fatalf("changed = %v, want both the modified and the added path, sorted", changed)
+	}
+}
+
+// TestIntegrationTaskStartReportsItsMCPSocket covers the other half of the
+// harness wiring: the tool channel of §4.2.
+//
+// Core serves a per-task MCP socket only while `varvig daemon` is running. A
+// cell with no tool-taking executor never needs one, so its absence is not an
+// error — but an executor that declares ToolsAttached and is handed nothing is a
+// cell that would work by guessing, so the loop refuses it. Both halves depend
+// on this line being read correctly.
+func TestIntegrationTaskStartReportsItsMCPSocket(t *testing.T) {
+	e := varvigRepo(t)
+	if err := os.WriteFile(filepath.Join(e.Dir, "a.txt"), []byte("hi\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.Commit(e.Dir, "base"); err != nil {
+		t.Fatal(err)
+	}
+
+	// With no daemon: a task still mints, and the socket is simply absent.
+	// Reporting one here would be worse than reporting none, because the loop
+	// would then run a tool-taking executor against a socket nothing serves.
+	task, err := e.TaskStart(TaskRequest{Scope: "/", TTL: 10 * time.Minute, Dir: filepath.Join(e.Dir, "work-nodaemon")})
+	if err != nil {
+		t.Fatalf("task start with no daemon: %v", err)
+	}
+	if task.Socket != "" {
+		t.Fatalf("a socket was reported with no daemon running: %q", task.Socket)
+	}
+	// Deliberately no TaskStop here: with no daemon there is nothing to revoke
+	// through, and core says so. The loop already treats a failed revoke as a
+	// log line rather than a failed attempt, which is the right call — the task
+	// key is ephemeral and expires on its own TTL either way.
+
+	// With a daemon, core names the per-task socket and it is a real one.
+	daemon := exec.Command(e.Bin, "daemon")
+	daemon.Dir = e.Dir
+	daemon.Env = append(os.Environ(), "VARVIG_AUTHOR=integration")
+	if err := daemon.Start(); err != nil {
+		t.Skipf("could not start a varvig daemon: %v", err)
+	}
+	defer func() {
+		_ = daemon.Process.Kill()
+		_, _ = daemon.Process.Wait()
+	}()
+	// The daemon needs its control socket up before `task start` can reach it.
+	var withDaemon Task
+	for i := 0; i < 50; i++ {
+		time.Sleep(100 * time.Millisecond)
+		withDaemon, err = e.TaskStart(TaskRequest{
+			Scope: "/", TTL: 10 * time.Minute,
+			Dir: filepath.Join(e.Dir, fmt.Sprintf("work-daemon-%d", i)),
+		})
+		if err == nil && withDaemon.Socket != "" {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatalf("task start with a daemon: %v", err)
+	}
+	if withDaemon.Socket == "" {
+		t.Skip("the daemon did not serve a per-task socket in time; nothing to assert about its path")
+	}
+	if !strings.Contains(withDaemon.Socket, "task-") || !strings.HasSuffix(withDaemon.Socket, ".sock") {
+		t.Fatalf("socket = %q, which is not a per-task socket path", withDaemon.Socket)
+	}
+	// The path must be the socket alone. The "connect varvig mcp --connect
+	// <path>" line below it names the same path inside a command, and taking
+	// that would hand an executor a socket path with a command wrapped round it.
+	if strings.Contains(withDaemon.Socket, " ") {
+		t.Fatalf("socket = %q; the connect line was parsed instead of the socket line", withDaemon.Socket)
+	}
+	if _, err := os.Stat(withDaemon.Socket); err != nil {
+		t.Fatalf("the reported socket does not exist: %v", err)
+	}
+	if err := e.TaskStop(withDaemon.ID); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -87,6 +89,20 @@ type Fake struct {
 	// directory name and the message, which is enough to give each attempt a
 	// distinct change hash without a filesystem.
 	CommitFunc func(dir, message string) (string, error)
+
+	// TaskSocket, if set, is handed back as Task.Socket — a stand-in for the
+	// per-task MCP socket core's daemon serves. Empty models the normal
+	// no-daemon case, which is what a cell with no tool-taking executor sees.
+	TaskSocket string
+
+	// ChangedFunc, if set, replaces the default Changed. The default compares
+	// the checkout against a snapshot taken at TaskStart, which is enough to
+	// tell an executor that edited something from one that did not.
+	ChangedFunc func(dir string) ([]string, error)
+
+	// snapshots holds the contents of each task checkout as it was minted, so
+	// Changed can answer honestly without modelling varvig's object store.
+	snapshots map[string]map[string]string
 
 	// Calls records every method invoked, in order, so a test can assert what a
 	// cell did — and, for §9.9, what it did not.
@@ -475,7 +491,69 @@ func (f *Fake) TaskStart(req TaskRequest) (Task, error) {
 	if dir == "" {
 		dir = "./task-" + id
 	}
-	return Task{ID: id, Dir: dir}, nil
+	// Snapshot the checkout as minted, so Changed can say what this task did to
+	// it rather than what it happens to contain.
+	if f.snapshots == nil {
+		f.snapshots = map[string]map[string]string{}
+	}
+	f.snapshots[dir] = snapshotDir(dir)
+	return Task{ID: id, Dir: dir, Socket: f.TaskSocket}, nil
+}
+
+// Changed implements Varvig by comparing the checkout with the snapshot taken
+// when the task was minted.
+//
+// It reads the real filesystem because the loop's checkouts are real
+// directories — an executor that edits in place edits actual files, and a fake
+// that pretended otherwise would not exercise the path that matters.
+func (f *Fake) Changed(dir string) ([]string, error) {
+	f.mu.Lock()
+	changedFunc := f.ChangedFunc
+	f.note("Changed")
+	before := f.snapshots[dir]
+	f.mu.Unlock()
+	if changedFunc != nil {
+		return changedFunc(dir)
+	}
+	now := snapshotDir(dir)
+	seen := map[string]bool{}
+	var out []string
+	for path, sum := range now {
+		seen[path] = true
+		if before[path] != sum {
+			out = append(out, path)
+		}
+	}
+	for path := range before {
+		if !seen[path] {
+			out = append(out, path)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// snapshotDir maps every file under dir to a hash of its contents. A directory
+// that does not exist yields an empty map rather than an error: a checkout that
+// was never made has changed nothing.
+func snapshotDir(dir string) map[string]string {
+	out := map[string]string{}
+	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil //nolint:nilerr // an unreadable file is not a change
+		}
+		body, err := os.ReadFile(path)
+		if err != nil {
+			return nil
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return nil
+		}
+		out[filepath.ToSlash(rel)] = fakeHash("file:" + string(body))
+		return nil
+	})
+	return out
 }
 
 // TaskStop implements Varvig.

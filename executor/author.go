@@ -47,6 +47,21 @@ type Request struct {
 	Attempt int
 	// MaxTokens bounds the response. Zero means the runtime's own default.
 	MaxTokens int
+
+	// Dir is the task checkout, set for an executor that declares
+	// EditsInPlace. Empty for one that answers with content, which has nothing
+	// to do with a directory and should not be handed one it might write to.
+	Dir string
+	// Socket is the task's MCP socket, set for an executor that declares
+	// ToolsAttached. It is scoped and propose-only, like the credential it
+	// belongs to, so what reaches an executor through it is bounded by what
+	// varvig already granted the task — the authority is on the channel, never
+	// on the model (§4.2).
+	//
+	// Empty when core is running without a daemon. An executor that asked for
+	// tools and got none is a degraded cell, and the loop refuses it rather
+	// than running it toolless.
+	Socket string
 }
 
 // ContextFile is one piece of supporting material.
@@ -69,15 +84,6 @@ type Response struct {
 	// prices it from tokens instead.
 	Cost cell.Money
 }
-
-// ErrIndescribable is returned by an executor that cannot report a reproducible
-// environment fragment.
-//
-// One error for every executor, because it is one rule: an executor that cannot
-// describe itself cannot participate in cross-cell selection at all (§4), and
-// that is as true of a test runner as of a model. Having had two of these, one
-// per adapter, was a small symptom of the same split this fold removes.
-var ErrIndescribable = errors.New("executor: cannot describe its environment reproducibly")
 
 // Params are the sampling parameters that affect output. They are recorded in
 // the environment descriptor's model.params field, canonically, so that two
@@ -125,10 +131,10 @@ type None struct{}
 // Name implements Authoring.
 func (None) Name() string { return "none" }
 
-// Properties implements Executor. A cell with no model authors nothing, so
+// Properties implements cell.Executor. A cell with no model authors nothing, so
 // every property is false — including ConsumesLease, which is the honest answer
 // for an executor that never runs.
-func (None) Properties() Properties { return Properties{} }
+func (None) Properties() cell.ExecutorProperties { return cell.ExecutorProperties{} }
 
 // Fragment implements Authoring. A cell with no model contributes no model field:
 // build and test evidence must not carry one, or deterministic evidence would

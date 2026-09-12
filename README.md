@@ -533,9 +533,9 @@ terms. Reading the cost model off the request would let a ticket declare a board
 order free.
 
 The vendor seam behind an effectful capability is `effect.Executor`, and it is
-deliberately not the §4 executor above: that one performs work for a cell, this
-one reaches an outside world that charges money. The reason for a seam at all is
-sharper here than anywhere else — the alternative to a fake is a real board
+deliberately not the `cell.Executor` above: that one performs work for a cell,
+this one reaches an outside world that charges money. The reason for a seam at
+all is sharper here than anywhere else — the alternative to a fake is a real board
 order. Only
 a **refusing** executor exists so far — pointing a cell at it proves the wiring
 works, with the ticket claimed, quoted, authorized and reserved, and nothing
@@ -773,7 +773,7 @@ runtimes.
 
 | Seam | Package | Implementations |
 |---|---|---|
-| **Executor** — anything that performs work | [`executor/`](./executor) | authoring: `http` (ollama, vLLM, llama.cpp server, hosted APIs), `command` (llama.cpp CLI, any local wrapper), `none`. checking: `subprocess`, `container`, `nix` |
+| **`cell.Executor`** — anything that performs work | contract in [`cell/`](./cell), implementations in [`executor/`](./executor) | authoring: `http` (ollama, vLLM, llama.cpp server, hosted APIs), `command` (llama.cpp CLI, any local wrapper), `harness` (Claude Code or anything shaped like it), `none`. checking: `subprocess`, `container`, `nix` |
 | **Artifact store** — the only other adapter, a sink | [`artifact/`](./artifact) | local CAS, plus a command-driven remote for OCI registries and S3-compatible stores |
 
 This used to be a model-runtime adapter *and* a build-sandbox adapter. They had
@@ -787,6 +787,89 @@ So a Claude Code harness is an executor that declares `loops` and
 `tools_attached`. A CNC machine is an executor that declares `effectful`. Neither
 needs an interface, a package, or a config section of its own — and that is the
 test of whether the seam is doing its job.
+
+### `cell.Executor` is not `effect.Executor`
+
+Two seams here have a claim to the word, and they are not variations on one
+idea:
+
+| | Does | If it goes wrong |
+|---|---|---|
+| `cell.Executor` | work *for* a cell — authors a change, runs a test | run it again |
+| `effect.Executor` | reaches an outside world that *charges money* | there is nothing to undo |
+
+That second row is the whole reason the `effect` package exists: the lease, the
+reservation, the higher principal, the refusal to speculate. A `cell.Executor`
+needs none of it, because getting its work wrong costs another run.
+
+The contract lives in [`cell/`](./cell) rather than in `executor/` so the names
+carry the distinction instead of the reader having to. It sits with the
+environment fragment it is obliged to produce, and an executor written outside
+this module imports one package rather than two. The implementations, and the
+`Authoring` / `Checking` interfaces that say which kind of work each one takes,
+stay in [`executor/`](./executor).
+
+A guard holds the line: the two interfaces must share no method. The way this
+erodes is convergence, not renaming — `effect.Executor` gets a `Name()` for
+better log lines, then `Properties()` because it is useful, and one morning
+merging them looks reasonable.
+
+Note that an executor may *declare* `effectful` as a property. That is not
+authority to act: it says what kind of thing the executor is, while what it may
+do still comes from a lease.
+
+### A harness is just an executor, which was the whole bet
+
+`§4.5`'s wiring table has two rows, and until recently only one existed:
+everything ran in the cell's process, answered once, and returned text. A
+harness does none of those. It gets a directory, edits files in it, loops on
+what it sees, and talks to varvig over a socket while it works.
+
+The fold's claim was that adding one should need no new interface, no new
+package and no new config kind. It held, with two additions that are rows in a
+table rather than concepts:
+
+- `Request` gained `Dir` and `Socket`, because the wiring an executor gets is
+  proportional to what it declares and nothing before declared these.
+- Properties gained `edits_in_place`, because "my response is a report" and "my
+  response is content to apply" are different contracts and a caller cannot
+  guess which one it holds.
+
+Neither is a case in a switch. The loop reads properties; it still cannot ask
+what an executor *is*, and the guard still fails the build on any attempt to.
+
+**`edits_in_place` is the one that bites silently.** A harness edits `src/a.go`
+and then describes the edit in its summary, as any harness reporting its work
+naturally would — so a caller parsing that summary as content overwrites the file
+with the prose description of it, and the tests then measure something nobody
+wrote. There is a vector for exactly this, with a report written in the shape the
+parser accepts.
+
+For such an executor, "did anything happen" is answered by asking varvig what
+changed. It has to be asked: `varvig commit` on a clean tree succeeds and records
+an **empty change**, so committing blind would fill the speculation pool with
+empty candidates that other cells would then score. What it changed is held to
+the ticket's declared write set exactly as parsed output is.
+
+### The tool channel, and what it bounds
+
+**Authority attaches to the tool channel, never to the model.** An executor
+declaring `tools_attached` gets the task's MCP socket — scoped and propose-only,
+exactly like the credential it belongs to — so whatever it asks varvig to do
+through it is bounded by what varvig already granted the task.
+
+A tool-taking executor handed no socket is **refused**, not run toolless: it
+would do its work by guessing at a repository it cannot read, and bill for it.
+An executor declaring no tools is handed no socket even when one exists, because
+a credential nobody decided to give it is not a convenience.
+
+Core serves a per-task socket only while `varvig daemon` is running, so a cell
+configured with a tool-taking executor needs one. A cell whose executors take no
+tools needs nothing and notices nothing.
+
+And note what running in a checkout is *not*: a sandbox. The subprocess runs
+with the cell's user and the cell's filesystem access, confined to the checkout
+by convention and its own behaviour. The confinement that is real is the socket.
 
 ### Properties, not kinds
 
@@ -813,7 +896,7 @@ is a *measurement*, not a configured claim: the HTTP executor probes the server
 for its version, the checking executor runs its version probes **through its own
 wrapper** so a container cell reports the toolchain inside the container rather
 than the host's. One that cannot describe itself reproducibly returns
-`ErrIndescribable` — emitting a guessed environment would make every downstream
+`cell.ErrIndescribable` — emitting a guessed environment would make every downstream
 cross-cell comparison a comparison of guesses.
 
 Two executors disagreeing about the machine they both run on is a hard error
@@ -870,14 +953,17 @@ degrading quietly is not.
 ```
 CELL.md                 the cell contract — normative, read this first
 cell/                   the contract in code: names, capabilities, evidence,
-                        environment + its hash, claims. No dependencies on anything.
+                        environment + its hash, claims, robes, and the
+                        cell.Executor seam. No dependencies on anything.
 varvigcli/              the Varvig interface + an Exec adapter over the public CLI,
                         the FactoryRepo/ProjectRepo handles that keep the two
                         repository kinds apart, and an in-memory Fake that models
                         refs-with-CAS, notes, the speculation pool and a
                         partitionable upstream
-executor/               the one seam anything that performs work sits behind:
-                        authoring (model) and checking (build, test), folded
+executor/               implementations of cell.Executor — authoring (model) and
+                        checking (build, test), folded into one seam. The
+                        contract itself lives in cell/, so that cell.Executor is
+                        visibly not effect.Executor
 artifact/               artifact-store seam
 budget/                 spend caps, halt behaviour, storage-pressure relief
 authority/              envelopes and leases: shared ceilings versus exclusive
@@ -1377,6 +1463,7 @@ The spec's §10, and what shipped for each step:
 | 17. Resolution: which existing provider fits | `robe/resolve.go` |
 | 18. Decision tasks | `decide/` |
 | 19. Procurement: what the factory should acquire | `robe/procure.go` |
+| 20. The harness executor — §4.5's second wiring row | `executor/harness.go`, `cell.ExecutorProperties.EditsInPlace` |
 
 ## Known gaps
 

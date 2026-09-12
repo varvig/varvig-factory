@@ -30,13 +30,15 @@ type FakeChecker struct {
 // Name implements Checking.
 func (f *FakeChecker) Name() string { return "fake" }
 
-// Properties implements Executor.
-func (f *FakeChecker) Properties() Properties { return Properties{Deterministic: true} }
+// Properties implements cell.Executor.
+func (f *FakeChecker) Properties() cell.ExecutorProperties {
+	return cell.ExecutorProperties{Deterministic: true}
+}
 
 // Fragment implements Checking.
 func (f *FakeChecker) Fragment(context.Context) (cell.Fragment, error) {
 	if f.Indescribable {
-		return cell.Fragment{}, ErrIndescribable
+		return cell.Fragment{}, cell.ErrIndescribable
 	}
 	platform := f.Platform
 	if platform == "" {

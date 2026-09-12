@@ -62,15 +62,15 @@ func TestFragmentRefusesWhenAProbeCannotRun(t *testing.T) {
 	// partial environment: a partial environment still hashes, and the hash
 	// would then certify a fiction (FACTORY.md §4).
 	e := Subprocess([]Probe{{Key: "missing", Command: []string{"definitely-not-a-real-binary-xyz"}}}, nil)
-	if _, err := e.Fragment(context.Background()); !errors.Is(err, ErrIndescribable) {
-		t.Fatalf("err = %v, want ErrIndescribable", err)
+	if _, err := e.Fragment(context.Background()); !errors.Is(err, cell.ErrIndescribable) {
+		t.Fatalf("err = %v, want cell.ErrIndescribable", err)
 	}
 }
 
 func TestFragmentRefusesAProbeThatProducesNothing(t *testing.T) {
 	e := Subprocess([]Probe{{Key: "quiet", Command: []string{"true"}}}, nil)
-	if _, err := e.Fragment(context.Background()); !errors.Is(err, ErrIndescribable) {
-		t.Fatalf("err = %v, want ErrIndescribable", err)
+	if _, err := e.Fragment(context.Background()); !errors.Is(err, cell.ErrIndescribable) {
+		t.Fatalf("err = %v, want cell.ErrIndescribable", err)
 	}
 }
 
