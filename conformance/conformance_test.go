@@ -23,12 +23,11 @@ import (
 	"github.com/varvig/varvig-factory/budget"
 	"github.com/varvig/varvig-factory/cell"
 	"github.com/varvig/varvig-factory/claim"
+	"github.com/varvig/varvig-factory/executor"
 	"github.com/varvig/varvig-factory/gate"
-	"github.com/varvig/varvig-factory/inference"
 	"github.com/varvig/varvig-factory/loop"
 	"github.com/varvig/varvig-factory/profile"
 	"github.com/varvig/varvig-factory/promote"
-	"github.com/varvig/varvig-factory/sandbox"
 	"github.com/varvig/varvig-factory/varvigcli"
 )
 
@@ -49,8 +48,8 @@ type harness struct {
 	// vectors that seed or inspect it directly. Which *role* a call is in is
 	// said by Factory()/Project(), not by this field.
 	V      *varvigcli.Fake
-	Model  *inference.Fake
-	Box    *sandbox.Fake
+	Model  *executor.FakeAuthor
+	Box    *executor.FakeChecker
 	Sw     *promote.Switch
 	Ledger *budget.Ledger
 	Logs   []string
@@ -130,17 +129,17 @@ func newHarness(t *testing.T, o opts) *harness {
 		})
 	}
 
-	model := &inference.Fake{
+	model := &executor.FakeAuthor{
 		Reply:          o.reply,
 		Model:          "test-model",
 		Version:        o.modelVersion,
 		RuntimeVersion: o.runtimeVersion,
 	}
-	var runtime inference.Runtime = model
+	var runtime executor.Authoring = model
 	if o.tier == cell.TierNone {
-		runtime = inference.None{}
+		runtime = executor.None{}
 	}
-	box := &sandbox.Fake{Platform: o.platform, Results: o.failing}
+	box := &executor.FakeChecker{Platform: o.platform, Results: o.failing}
 
 	ledger, err := budget.NewLedger(o.budget, "", now)
 	if err != nil {
@@ -173,8 +172,8 @@ func newHarness(t *testing.T, o opts) *harness {
 		},
 		Factory:           fr,
 		Project:           pr,
-		Inference:         runtime,
-		Sandbox:           box,
+		Authoring:         runtime,
+		Checking:          box,
 		Artifacts:         &artifact.LocalCAS{Root: filepath.Join(t.TempDir(), "cas")},
 		Ledger:            ledger,
 		Rendezvous:        loop.Peers{upstreamAddr},
@@ -761,7 +760,7 @@ func Test06_BudgetHalt(t *testing.T) {
 	if h.Cell.Capabilities.Inference.Tier != cell.TierLarge {
 		t.Fatalf("the cell downgraded its tier to %q under budget pressure", h.Cell.Capabilities.Inference.Tier)
 	}
-	if h.Cell.Inference != inference.Runtime(h.Model) {
+	if h.Cell.Authoring != executor.Authoring(h.Model) {
 		t.Fatal("the cell swapped its model runtime under budget pressure")
 	}
 

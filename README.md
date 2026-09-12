@@ -532,8 +532,11 @@ A ticket supplies a capability's identity; the cell's configuration supplies its
 terms. Reading the cost model off the request would let a ticket declare a board
 order free.
 
-The executor is a seam like the model runtime and the build sandbox, and for a
-sharper reason than either: the alternative to a fake is a real board order. Only
+The vendor seam behind an effectful capability is `effect.Executor`, and it is
+deliberately not the §4 executor above: that one performs work for a cell, this
+one reaches an outside world that charges money. The reason for a seam at all is
+sharper here than anywhere else — the alternative to a fake is a real board
+order. Only
 a **refusing** executor exists so far — pointing a cell at it proves the wiring
 works, with the ticket claimed, quoted, authorized and reserved, and nothing
 ordered.
@@ -649,31 +652,61 @@ Every unmet rule is reported at once. Elsewhere an early exit saves an expensive
 re-verification; nothing here is expensive, and an operator about to spend money
 should see the whole list rather than one round trip per broken rule.
 
-## Adapters
+## Seams
 
-Three seams. Everything hardware- or vendor-shaped lives behind them, so neither
-varvig nor Factory's core loop learns about CUDA, quantization or container
+**Two seams, not four.** Everything hardware- or vendor-shaped lives behind them,
+so neither varvig nor the cell loop learns about CUDA, quantization or container
 runtimes.
 
 | Seam | Package | Implementations |
 |---|---|---|
-| Model runtime | [`inference/`](./inference) | `http` (ollama, vLLM, llama.cpp server, hosted APIs), `command` (llama.cpp CLI, any local wrapper), `none` |
-| Build sandbox | [`sandbox/`](./sandbox) | `subprocess`, `container`, `nix` |
-| Artifact store | [`artifact/`](./artifact) | local CAS, plus a command-driven remote for OCI registries and S3-compatible stores |
+| **Executor** — anything that performs work | [`executor/`](./executor) | authoring: `http` (ollama, vLLM, llama.cpp server, hosted APIs), `command` (llama.cpp CLI, any local wrapper), `none`. checking: `subprocess`, `container`, `nix` |
+| **Artifact store** — the only other adapter, a sink | [`artifact/`](./artifact) | local CAS, plus a command-driven remote for OCI registries and S3-compatible stores |
 
-Each adapter reports a **deterministic environment fragment**, and the fragment
-is a *measurement*, not a configured claim: the HTTP runtime probes the server
-for its version, the sandbox runs its version probes **through its own wrapper**
-so a container cell reports the toolchain inside the container rather than the
-host's. An adapter that cannot describe itself reproducibly returns
-`ErrIndescribable` and the cell refuses to start — emitting a guessed
-environment would make every downstream cross-cell comparison a comparison of
-guesses.
+This used to be a model-runtime adapter *and* a build-sandbox adapter. They had
+one shape — name yourself, describe your environment, do a unit of work — and
+keeping them apart made "how does a cell run a model" a different question from
+"how does a cell run a test". A harness would have been a third answer to a
+question that should only have one, which is what "two things owning the same
+concern" costs.
 
-Two adapters disagreeing about the machine they both run on is a hard error
-rather than a last-writer-wins merge. If the sandbox says Go 1.24.7 and the model
-runtime says Go 1.22, one of them is wrong, and either value produces an
-environment hash that certifies a fiction.
+So a Claude Code harness is an executor that declares `loops` and
+`tools_attached`. A CNC machine is an executor that declares `effectful`. Neither
+needs an interface, a package, or a config section of its own — and that is the
+test of whether the seam is doing its job.
+
+### Properties, not kinds
+
+An executor declares what it is *like*, never what it *is*: `loops`,
+`tools_attached`, `deterministic`, `consumes_lease`, `effectful`. The wiring an
+executor gets is proportional to what it declares, so a new shape changes a
+table of behaviour rather than a list of cases.
+
+[A guard](./guard/guard_test.go) fails the build if anything outside the package
+starts asking. The mistake it catches arrives with the first harness: writing
+`if h, ok := e.(*executor.Harness)` works for the executor in front of you and
+not for the one somebody adds next, and a list of cases growing one entry per
+vendor is the four-adapter model returning under a different name.
+
+`deterministic` is the load-bearing property. A checking executor is
+deterministic, which is what lets one cell's evidence license another's attempt
+and why a transaction may safely re-run it; an authoring executor is not, which
+is why one must never run inside anything that retries.
+
+### Describing the environment
+
+Every executor reports a **deterministic environment fragment**, and the fragment
+is a *measurement*, not a configured claim: the HTTP executor probes the server
+for its version, the checking executor runs its version probes **through its own
+wrapper** so a container cell reports the toolchain inside the container rather
+than the host's. One that cannot describe itself reproducibly returns
+`ErrIndescribable` — emitting a guessed environment would make every downstream
+cross-cell comparison a comparison of guesses.
+
+Two executors disagreeing about the machine they both run on is a hard error
+rather than a last-writer-wins merge. If the checking executor says Go 1.24.7 and
+the authoring one says Go 1.22, one of them is wrong, and either value produces
+an environment hash that certifies a fiction.
 
 The three sandbox profiles are **one type with a different wrapper**, not three
 implementations — `Subprocess`, `Container` and `Nix` all return the same
@@ -730,8 +763,8 @@ varvigcli/              the Varvig interface + an Exec adapter over the public C
                         repository kinds apart, and an in-memory Fake that models
                         refs-with-CAS, notes, the speculation pool and a
                         partitionable upstream
-inference/              model-runtime seam
-sandbox/                build-sandbox seam
+executor/               the one seam anything that performs work sits behind:
+                        authoring (model) and checking (build, test), folded
 artifact/               artifact-store seam
 budget/                 spend caps, halt behaviour, storage-pressure relief
 authority/              envelopes and leases: shared ceilings versus exclusive

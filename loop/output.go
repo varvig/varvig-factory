@@ -11,7 +11,7 @@ import (
 )
 
 // FileMarker is the line prefix that introduces a file in a model's output. It
-// matches the instruction in inference.Prompt, and the two must stay in step —
+// matches the instruction in executor.Prompt, and the two must stay in step —
 // which is why the marker is a named constant in the package that consumes it
 // rather than a literal in both.
 const FileMarker = "--- "

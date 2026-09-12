@@ -5,7 +5,7 @@
 //  2. observe open tickets in scope
 //  3. evaluate claim policy  → claim or skip
 //  4. submit the task to varvig
-//  5. build + test in sandbox → evidence + environment
+//  5. build + test through a checking executor → evidence + environment
 //  6. write artifact-refs for any binary outputs
 //  7. commit attempt as immutable state
 //  8. pin what upstream should retain
@@ -44,9 +44,8 @@ import (
 	"github.com/varvig/varvig-factory/cell"
 	"github.com/varvig/varvig-factory/claim"
 	"github.com/varvig/varvig-factory/effect"
-	"github.com/varvig/varvig-factory/inference"
+	"github.com/varvig/varvig-factory/executor"
 	"github.com/varvig/varvig-factory/promote"
-	"github.com/varvig/varvig-factory/sandbox"
 	"github.com/varvig/varvig-factory/varvigcli"
 )
 
@@ -76,8 +75,8 @@ type Cell struct {
 	// two even when the repository is one.
 	Project varvigcli.ProjectRepo
 
-	Inference inference.Runtime
-	Sandbox   sandbox.Sandbox
+	Authoring executor.Authoring
+	Checking  executor.Checking
 	Artifacts artifact.Store
 	Ledger    *budget.Ledger
 	Promoter  *promote.Promoter
@@ -262,17 +261,19 @@ func (c *Cell) Validate(ctx context.Context) error {
 	if c.ClaimTTL <= 0 {
 		return errors.New("loop: claim ttl must be positive; an unexpiring claim is a lock")
 	}
-	// The build sandbox must be able to describe itself, checked once at startup
+	// The checking executor must be able to describe itself, checked once at startup
 	// rather than at the first attempt (§4). A cell that cannot describe the
 	// environment its tests run in cannot participate in cross-cell selection,
 	// so it should not start and produce evidence nobody can compare.
-	if c.Sandbox != nil {
-		if _, err := c.Sandbox.Fragment(ctx); err != nil {
-			return fmt.Errorf("loop: sandbox adapter: %w", err)
+	if c.Checking != nil {
+		if _, err := c.Checking.Fragment(ctx); err != nil {
+			return fmt.Errorf("loop: checking executor: %w", err)
 		}
 	}
-	// The model runtime is deliberately **not** checked here, and the asymmetry
-	// with the sandbox above is the §9.17 rule rather than an oversight.
+	// The authoring executor is deliberately **not** checked here, and the
+	// asymmetry with the checking one above is the §9.17 rule rather than an
+	// oversight. Both are executors now (§4) and the seam is one; what differs
+	// is what a cell can still do without each.
 	//
 	// This used to refuse to start when a cell held the attempt role and its
 	// runtime was absent or could not describe itself. That took a cell still
@@ -284,13 +285,13 @@ func (c *Cell) Validate(ctx context.Context) error {
 	//
 	// So reachability is measured per pass and reaches claim policy as an input
 	// (claim.Inputs.ExecutorReachable), where it declines attempts and nothing
-	// else. The sandbox stays fatal because a cell that cannot describe its
-	// build environment cannot do the deterministic work either, so there would
-	// be nothing left to degrade to.
+	// else. The checking executor stays fatal because a cell that cannot
+	// describe its build environment cannot do the deterministic work either,
+	// so there would be nothing left to degrade to.
 	return nil
 }
 
-// executorReachable asks the model runtime whether it can describe itself, and
+// executorReachable asks the authoring executor whether it can describe itself, and
 // is the loop's answer to "can this cell author anything right now".
 //
 // Fragment is the probe because it is the one call that must be a measurement
@@ -306,11 +307,11 @@ func (c *Cell) executorReachable(ctx context.Context) (bool, string) {
 	if !c.Capabilities.Has(cell.RoleAttempt) {
 		return false, "cell does not attempt"
 	}
-	if c.Inference == nil {
-		return false, "no model runtime is configured for a cell that advertises attempting"
+	if c.Authoring == nil {
+		return false, "no authoring executor is configured for a cell that advertises attempting"
 	}
-	if _, err := c.Inference.Fragment(ctx); err != nil {
-		return false, fmt.Sprintf("model runtime %s cannot describe itself: %v", c.Inference.Name(), err)
+	if _, err := c.Authoring.Fragment(ctx); err != nil {
+		return false, fmt.Sprintf("authoring executor %s cannot describe itself: %v", c.Authoring.Name(), err)
 	}
 	return true, ""
 }
@@ -779,14 +780,14 @@ func (c *Cell) attempt(ctx context.Context, t claim.Ticket, n int, offline bool)
 
 	// Authoring. The budget check happened in the claim policy; the spend is
 	// recorded here, after the call, from what the runtime actually reported.
-	resp, err := c.Inference.Generate(ctx, inference.Request{
+	resp, err := c.Authoring.Author(ctx, executor.Request{
 		Task:    t.ID,
 		Intent:  t.Spec,
 		Attempt: n,
 		Context: c.readContext(task.Dir, t.Scope),
 	})
 	if err != nil {
-		return AttemptResult{}, fmt.Errorf("inference: %w", err)
+		return AttemptResult{}, fmt.Errorf("authoring: %w", err)
 	}
 	cost := c.Ledger.Spend(c.now(), offline, resp.TokensIn, resp.TokensOut)
 
@@ -942,7 +943,7 @@ func (c *Cell) runChecks(ctx context.Context, dir, taskID, change string) (cell.
 			ev.Checks = append(ev.Checks, cell.Check{Name: chk.Name, Status: cell.StatusSkip, Detail: string(slot.Reason)})
 			continue
 		}
-		res, err := c.Sandbox.Run(ctx, sandbox.Job{Name: chk.Name, Dir: dir, Command: chk.Command, Timeout: chk.Timeout})
+		res, err := c.Checking.Check(ctx, executor.Job{Name: chk.Name, Dir: dir, Command: chk.Command, Timeout: chk.Timeout})
 		c.Ledger.ReleaseVerify()
 		if err != nil {
 			ev.Checks = append(ev.Checks, cell.Check{Name: chk.Name, Status: cell.StatusError, Detail: err.Error()})
@@ -978,11 +979,11 @@ func (c *Cell) checksFor() []Check {
 	return out
 }
 
-// checkEnvironment merges the sandbox and artifact-store fragments — no model.
+// checkEnvironment merges the checking executor and artifact-store fragments — no model.
 func (c *Cell) checkEnvironment(ctx context.Context) (cell.Environment, error) {
 	var frags []cell.Fragment
-	if c.Sandbox != nil {
-		f, err := c.Sandbox.Fragment(ctx)
+	if c.Checking != nil {
+		f, err := c.Checking.Fragment(ctx)
 		if err != nil {
 			return cell.Environment{}, err
 		}
@@ -1135,8 +1136,8 @@ func (c *Cell) attachArtifact(taskID, change string, ref cell.ArtifactRef) error
 // material for the model. It reads only inside the checkout varvig materialized,
 // which is the scope: the read set doubles as the capability boundary
 // (TICKETS.md §3.1), so there is nothing here to enforce separately.
-func (c *Cell) readContext(dir string, scope varvigcli.Scope) []inference.ContextFile {
-	var out []inference.ContextFile
+func (c *Cell) readContext(dir string, scope varvigcli.Scope) []executor.ContextFile {
+	var out []executor.ContextFile
 	for _, p := range scope.Reads {
 		full := filepath.Join(dir, p)
 		info, err := os.Stat(full)
@@ -1153,13 +1154,13 @@ func (c *Cell) readContext(dir string, scope varvigcli.Scope) []inference.Contex
 					continue
 				}
 				if b, err := os.ReadFile(filepath.Join(full, e.Name())); err == nil {
-					out = append(out, inference.ContextFile{Path: filepath.Join(p, e.Name()), Content: string(b)})
+					out = append(out, executor.ContextFile{Path: filepath.Join(p, e.Name()), Content: string(b)})
 				}
 			}
 			continue
 		}
 		if b, err := os.ReadFile(full); err == nil {
-			out = append(out, inference.ContextFile{Path: p, Content: string(b)})
+			out = append(out, executor.ContextFile{Path: p, Content: string(b)})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })

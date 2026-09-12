@@ -1,4 +1,4 @@
-package inference
+package executor
 
 import (
 	"bytes"
@@ -11,11 +11,11 @@ import (
 	"github.com/varvig/varvig-factory/cell"
 )
 
-// CommandRuntime drives a model as a subprocess: llama.cpp's CLI, a local
+// Command drives a model as a subprocess: llama.cpp's CLI, a local
 // wrapper script, anything that reads a prompt on stdin and writes a completion
 // on stdout. It is the fourth row of the §4 table, and the one that makes the
 // seam obviously real — a runtime with no HTTP surface at all still plugs in.
-type CommandRuntime struct {
+type Command struct {
 	// Path is the executable.
 	Path string
 	// Args are passed to every invocation. The prompt goes on stdin rather than
@@ -40,17 +40,24 @@ type CommandRuntime struct {
 	fragErr  error
 }
 
-// Name implements Runtime.
-func (c *CommandRuntime) Name() string { return "command" }
+// Name implements Authoring.
+func (c *Command) Name() string { return "command" }
 
-// Fragment implements Runtime by running VersionArgs once and caching the
+// Properties implements Executor. One model call per request, no tool channel,
+// and not deterministic — a model is the thing a transaction must never re-run
+// (§4.4). It spends budget, which is what makes it the ConsumesLease case.
+func (c *Command) Properties() Properties {
+	return Properties{ConsumesLease: true}
+}
+
+// Fragment implements Authoring by running VersionArgs once and caching the
 // output. Measured from the binary that will actually run, per CELL.md §6.
-func (c *CommandRuntime) Fragment(ctx context.Context) (cell.Fragment, error) {
+func (c *Command) Fragment(ctx context.Context) (cell.Fragment, error) {
 	c.once.Do(func() { c.fragment, c.fragErr = c.probe(ctx) })
 	return c.fragment, c.fragErr
 }
 
-func (c *CommandRuntime) probe(ctx context.Context) (cell.Fragment, error) {
+func (c *Command) probe(ctx context.Context) (cell.Fragment, error) {
 	if c.Path == "" {
 		return cell.Fragment{}, fmt.Errorf("inference: command runtime has no path configured")
 	}
@@ -74,8 +81,8 @@ func (c *CommandRuntime) probe(ctx context.Context) (cell.Fragment, error) {
 	}, nil
 }
 
-// Generate implements Runtime.
-func (c *CommandRuntime) Generate(ctx context.Context, r Request) (Response, error) {
+// Author implements Authoring.
+func (c *Command) Author(ctx context.Context, r Request) (Response, error) {
 	if c.Path == "" {
 		return Response{}, fmt.Errorf("inference: command runtime has no path configured")
 	}

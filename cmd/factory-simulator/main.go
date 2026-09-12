@@ -47,11 +47,10 @@ import (
 	"github.com/varvig/varvig-factory/budget"
 	"github.com/varvig/varvig-factory/cell"
 	"github.com/varvig/varvig-factory/effect"
+	"github.com/varvig/varvig-factory/executor"
 	"github.com/varvig/varvig-factory/gate"
-	"github.com/varvig/varvig-factory/inference"
 	"github.com/varvig/varvig-factory/loop"
 	"github.com/varvig/varvig-factory/promote"
-	"github.com/varvig/varvig-factory/sandbox"
 	"github.com/varvig/varvig-factory/varvigcli"
 )
 
@@ -178,7 +177,7 @@ func run() error {
 	// cells to partition. Same binary, same code — one field of configuration.
 	micro.cell.Capabilities.Roles = append(micro.cell.Capabilities.Roles, cell.RoleAttempt)
 	micro.cell.Capabilities.Inference = largeTier()
-	micro.cell.Inference = &inference.Fake{Reply: "--- src/b.go\npackage src\n\nfunc BFromMicro() {}\n", Model: "sim-model"}
+	micro.cell.Authoring = &executor.FakeAuthor{Reply: "--- src/b.go\npackage src\n\nfunc BFromMicro() {}\n", Model: "sim-model"}
 	micro.ledgerRefill()
 
 	mini.v.Partitioned = true
@@ -560,9 +559,9 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 		sw: sw, ledger: ledger, switchPath: switchPath,
 		fingerprint: "SHA256:" + id, budget: b, work: work}
 
-	var runtime inference.Runtime = inference.None{}
+	var runtime executor.Authoring = executor.None{}
 	if inf.Tier != cell.TierNone {
-		runtime = &inference.Fake{
+		runtime = &executor.FakeAuthor{
 			Reply: "--- src/a.go\npackage src\n\nfunc AFrom" + id + "() {}\n",
 			Model: "sim-model",
 		}
@@ -574,8 +573,8 @@ func newCell(work, id string, upstream *varvigcli.Fake, roles []cell.Role, inf c
 		},
 		Factory:   factory,
 		Project:   project,
-		Inference: runtime,
-		Sandbox:   &sandbox.Fake{},
+		Authoring: runtime,
+		Checking:  &executor.FakeChecker{},
 		Artifacts: &artifact.LocalCAS{Root: filepath.Join(work, id, "artifacts")},
 		Ledger:    ledger,
 		// The simulator's one replica serves both roles, so the same rendezvous set

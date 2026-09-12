@@ -1,4 +1,4 @@
-package inference
+package executor
 
 import (
 	"context"
@@ -39,7 +39,7 @@ func TestNoneDescribesItselfWithoutAModel(t *testing.T) {
 	if frag.Model != nil {
 		t.Fatalf("the model-less runtime reported a model: %+v", frag.Model)
 	}
-	if _, err := (None{}).Generate(context.Background(), Request{}); err == nil {
+	if _, err := (None{}).Author(context.Background(), Request{}); err == nil {
 		t.Fatal("a cell with no model generated something")
 	}
 }
@@ -57,7 +57,7 @@ func TestHTTPFragmentProbesTheServerAndCachesIt(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt := &HTTPRuntime{
+	rt := &HTTP{
 		Endpoint:     srv.URL + "/v1/chat/completions",
 		VersionURL:   srv.URL + "/api/version",
 		Model:        "qwen2.5-coder",
@@ -105,7 +105,7 @@ func TestHTTPFragmentFallsBackToADigestOfWhateverTheServerReports(t *testing.T) 
 	}))
 	defer srv.Close()
 
-	rt := &HTTPRuntime{VersionURL: srv.URL, Model: "m"}
+	rt := &HTTP{VersionURL: srv.URL, Model: "m"}
 	frag, err := rt.Fragment(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -119,14 +119,14 @@ func TestHTTPFragmentFallsBackToADigestOfWhateverTheServerReports(t *testing.T) 
 func TestHTTPWithoutAVersionURLIsIndescribable(t *testing.T) {
 	// A version read from configuration is a claim about the server, not a
 	// measurement of it (CELL.md §6).
-	rt := &HTTPRuntime{Endpoint: "http://127.0.0.1:1/v1/chat/completions", Model: "m"}
+	rt := &HTTP{Endpoint: "http://127.0.0.1:1/v1/chat/completions", Model: "m"}
 	if _, err := rt.Fragment(context.Background()); !errors.Is(err, ErrIndescribable) {
 		t.Fatalf("err = %v, want ErrIndescribable", err)
 	}
 }
 
 func TestHTTPUnreachableServerIsIndescribableNotSilent(t *testing.T) {
-	rt := &HTTPRuntime{VersionURL: "http://127.0.0.1:1/version", Model: "m"}
+	rt := &HTTP{VersionURL: "http://127.0.0.1:1/version", Model: "m"}
 	if _, err := rt.Fragment(context.Background()); !errors.Is(err, ErrIndescribable) {
 		t.Fatalf("err = %v, want ErrIndescribable", err)
 	}
@@ -145,7 +145,7 @@ func TestHTTPGenerateSendsAndParsesTheChatShape(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rt := &HTTPRuntime{
+	rt := &HTTP{
 		Endpoint:   srv.URL,
 		Model:      "m",
 		Params:     Params{Temperature: 0.2, Seed: 7},
@@ -153,7 +153,7 @@ func TestHTTPGenerateSendsAndParsesTheChatShape(t *testing.T) {
 		AuthValue:  "Bearer secret",
 		System:     "be brief",
 	}
-	resp, err := rt.Generate(context.Background(), Request{Intent: "add a file", Attempt: 1})
+	resp, err := rt.Author(context.Background(), Request{Intent: "add a file", Attempt: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -183,8 +183,8 @@ func TestHTTPGenerateSurfacesServerErrors(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":{"message":"out of capacity"}}`))
 	}))
 	defer srv.Close()
-	rt := &HTTPRuntime{Endpoint: srv.URL, Model: "m"}
-	_, err := rt.Generate(context.Background(), Request{})
+	rt := &HTTP{Endpoint: srv.URL, Model: "m"}
+	_, err := rt.Author(context.Background(), Request{})
 	if err == nil {
 		t.Fatal("a 429 was reported as success")
 	}
@@ -201,14 +201,14 @@ func TestHTTPGenerateRejectsAnEmptyChoiceList(t *testing.T) {
 		_, _ = w.Write([]byte(`{"choices":[]}`))
 	}))
 	defer srv.Close()
-	rt := &HTTPRuntime{Endpoint: srv.URL, Model: "m"}
-	if _, err := rt.Generate(context.Background(), Request{}); err == nil {
+	rt := &HTTP{Endpoint: srv.URL, Model: "m"}
+	if _, err := rt.Author(context.Background(), Request{}); err == nil {
 		t.Fatal("an empty choice list was accepted")
 	}
 }
 
 func TestCommandRuntimeMeasuresItsVersionAndGenerates(t *testing.T) {
-	rt := &CommandRuntime{
+	rt := &Command{
 		Path:        "sh",
 		Args:        []string{"-c", "cat >/dev/null; printf '%s' '--- a.txt\nhi\n'"},
 		VersionArgs: []string{"-c", "printf '%s\n' 'shim 1.2.3'"},
@@ -221,7 +221,7 @@ func TestCommandRuntimeMeasuresItsVersionAndGenerates(t *testing.T) {
 	if got := frag.Toolchains["inference-runtime"]; got != "shim 1.2.3" {
 		t.Fatalf("version = %q, want 'shim 1.2.3'", got)
 	}
-	resp, err := rt.Generate(context.Background(), Request{Intent: "x"})
+	resp, err := rt.Author(context.Background(), Request{Intent: "x"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +237,7 @@ func TestCommandRuntimeMeasuresItsVersionAndGenerates(t *testing.T) {
 }
 
 func TestCommandRuntimeWithoutVersionArgsIsIndescribable(t *testing.T) {
-	rt := &CommandRuntime{Path: "sh", Model: "m"}
+	rt := &Command{Path: "sh", Model: "m"}
 	if _, err := rt.Fragment(context.Background()); !errors.Is(err, ErrIndescribable) {
 		t.Fatalf("err = %v, want ErrIndescribable", err)
 	}
@@ -246,7 +246,7 @@ func TestCommandRuntimeWithoutVersionArgsIsIndescribable(t *testing.T) {
 func TestCommandRuntimeAcceptsAVersionOnStderr(t *testing.T) {
 	// Plenty of tools print --version to stderr; calling the adapter
 	// indescribable over a stream choice would be pedantry with a cost.
-	rt := &CommandRuntime{
+	rt := &Command{
 		Path:        "sh",
 		VersionArgs: []string{"-c", "printf '%s\n' 'v4 on stderr' 1>&2"},
 		Model:       "m",
@@ -276,15 +276,15 @@ func TestPromptIsSharedAcrossAdapters(t *testing.T) {
 func TestFakeVariesRepliesByAttempt(t *testing.T) {
 	// Duplicate attempts are the point (FACTORY.md §5.1), so making two
 	// attempts differ has to be possible without the loop dictating how.
-	f := &Fake{Replies: []string{"first", "second"}}
-	a, _ := f.Generate(context.Background(), Request{Attempt: 1})
-	b, _ := f.Generate(context.Background(), Request{Attempt: 2})
+	f := &FakeAuthor{Replies: []string{"first", "second"}}
+	a, _ := f.Author(context.Background(), Request{Attempt: 1})
+	b, _ := f.Author(context.Background(), Request{Attempt: 2})
 	if a.Text != "first" || b.Text != "second" {
 		t.Fatalf("replies = %q, %q", a.Text, b.Text)
 	}
 	// Out of range clamps rather than panicking: attempts_default may exceed
 	// the scripted list, and a panic in a test fake is a wasted afternoon.
-	c, _ := f.Generate(context.Background(), Request{Attempt: 9})
+	c, _ := f.Author(context.Background(), Request{Attempt: 9})
 	if c.Text != "second" {
 		t.Fatalf("clamped reply = %q", c.Text)
 	}
@@ -294,8 +294,8 @@ func TestFakeVariesRepliesByAttempt(t *testing.T) {
 }
 
 var (
-	_ Runtime = None{}
-	_ Runtime = (*HTTPRuntime)(nil)
-	_ Runtime = (*CommandRuntime)(nil)
-	_ Runtime = (*Fake)(nil)
+	_ Authoring = None{}
+	_ Authoring = (*HTTP)(nil)
+	_ Authoring = (*Command)(nil)
+	_ Authoring = (*FakeAuthor)(nil)
 )
