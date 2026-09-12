@@ -83,6 +83,19 @@ type ExecutorProperties struct {
 	// ConsumesLease says running it spends budget. An agent does; a test run
 	// mostly does not.
 	ConsumesLease bool
+	// EditsInPlace says the executor writes into the checkout itself, so its
+	// response is a **report of work already done** rather than content to
+	// apply.
+	//
+	// The two are not interchangeable and getting it wrong is not a no-op. A
+	// caller that parses a harness's summary as file content will happily
+	// overwrite the files the harness just wrote with whatever its prose
+	// quoted back — the summary of a change, mistaken for the change.
+	//
+	// Independent of Loops, deliberately. A multi-turn conversation that ends
+	// by emitting a patch loops without editing anything; a codemod script
+	// edits in place without looping.
+	EditsInPlace bool
 	// Effectful says it has real-world side effects — the §8.2 class, here just
 	// a property.
 	//

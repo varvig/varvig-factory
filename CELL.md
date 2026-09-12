@@ -1,6 +1,6 @@
 # The Cell Contract
 
-*Normative. Version 11* — moves the executor contract to `cell.Executor`, so it is visibly not `effect.Executor` (§6); adds robes and the responsibilities that carry no authority (§3.4), externally-originated tickets (§3.5) and decision tasks (§5.1); folds the model-runtime and build-sandbox adapters into one executor seam (§6), separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
+*Normative. Version 12* — adds `edits_in_place` and the tool channel's rules (§6.1); moves the executor contract to `cell.Executor`, so it is visibly not `effect.Executor` (§6); adds robes and the responsibilities that carry no authority (§3.4), externally-originated tickets (§3.5) and decision tasks (§5.1); folds the model-runtime and build-sandbox adapters into one executor seam (§6), separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
 effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
@@ -563,6 +563,7 @@ An executor declares what it is *like*, never what it *is* (§4.1):
 | `tools_attached` | Receives a task MCP socket — the line between thinking and doing |
 | `deterministic` | Results are evidence-comparable and cacheable |
 | `consumes_lease` | Running it spends budget |
+| `edits_in_place` | Writes into the checkout itself, so its response is a **report** rather than content to apply |
 | `effectful` | Real-world side effects — the §8.2 class, here just a property |
 
 Nothing branches on which executor it holds, and a guard fails the build if
@@ -570,10 +571,58 @@ anything starts to: the wiring an executor gets is proportional to the
 properties it declares, so a new shape of executor changes a table of behaviour
 rather than a list of cases.
 
+`edits_in_place` is the one that bites silently if it is wrong, and it is not a
+no-op either way. A harness edits `src/a.go` and then *describes* the edit in its
+summary, as any harness reporting its work naturally would — so a caller that
+parsed the summary as content would overwrite the file with the prose
+description of it, and the tests would then measure something nobody wrote.
+
+It is independent of `loops`, deliberately: a multi-turn conversation that ends
+by emitting a patch loops without editing anything, and a codemod script edits in
+place without looping.
+
+For such an executor, "did anything happen" is answered by asking varvig what
+changed rather than by parsing a response — and it has to be asked, because
+committing a clean tree succeeds and records an **empty change**, which would
+put empty candidates in the speculation pool for other cells to score. What it
+changed is then held to the ticket's declared write set exactly as parsed output
+is: an attempt that touched paths outside it is a change claiming one scope and
+holding another, and varvig serialized on the claim.
+
 `deterministic` is the load-bearing one. A checking executor is deterministic,
 which is what lets one cell's evidence license another cell's attempt (§6.3.1)
 and why a transaction may re-run it; an authoring executor is not, which is why
 one must never run inside anything that retries (§8.2 rule 7).
+
+#### The tool channel
+
+An executor that declares `tools_attached` receives the task's MCP socket, which
+core's daemon serves for the life of the task. This is the §4.2 line, and it is
+worth stating as a rule rather than as wiring:
+
+**Authority attaches to the tool channel, never to the model.** The socket is
+scoped and propose-only, exactly like the credential it belongs to, so whatever
+an executor asks varvig to do through it is bounded by what varvig already
+granted the task. Nothing about the model — which one, whose, how large —
+changes that bound.
+
+Two consequences:
+
+- An executor that declares `tools_attached` and is handed **no** socket is
+  refused, not run toolless. A harness with no tool channel does its work by
+  guessing at a repository it cannot read, and bills for it.
+- An executor that declares no tools is handed **no** socket even when one
+  exists. The wiring an executor gets is proportional to what it declares, and
+  a socket it never asked for is a credential nobody decided to give it.
+
+Core serves a per-task socket only while its daemon is running, so a cell
+configured with a tool-taking executor needs one. A cell whose executors take no
+tools needs nothing and notices nothing.
+
+Note what running in a checkout is **not**: a sandbox. A subprocess executor
+runs with the cell's user and the cell's filesystem access, confined to the
+checkout by convention and by its own behaviour. The confinement that is real is
+on the tool channel.
 
 ### 6.2 Describing the environment
 

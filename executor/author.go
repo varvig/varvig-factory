@@ -47,6 +47,21 @@ type Request struct {
 	Attempt int
 	// MaxTokens bounds the response. Zero means the runtime's own default.
 	MaxTokens int
+
+	// Dir is the task checkout, set for an executor that declares
+	// EditsInPlace. Empty for one that answers with content, which has nothing
+	// to do with a directory and should not be handed one it might write to.
+	Dir string
+	// Socket is the task's MCP socket, set for an executor that declares
+	// ToolsAttached. It is scoped and propose-only, like the credential it
+	// belongs to, so what reaches an executor through it is bounded by what
+	// varvig already granted the task — the authority is on the channel, never
+	// on the model (§4.2).
+	//
+	// Empty when core is running without a daemon. An executor that asked for
+	// tools and got none is a degraded cell, and the loop refuses it rather
+	// than running it toolless.
+	Socket string
 }
 
 // ContextFile is one piece of supporting material.

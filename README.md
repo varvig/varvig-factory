@@ -773,7 +773,7 @@ runtimes.
 
 | Seam | Package | Implementations |
 |---|---|---|
-| **`cell.Executor`** — anything that performs work | contract in [`cell/`](./cell), implementations in [`executor/`](./executor) | authoring: `http` (ollama, vLLM, llama.cpp server, hosted APIs), `command` (llama.cpp CLI, any local wrapper), `none`. checking: `subprocess`, `container`, `nix` |
+| **`cell.Executor`** — anything that performs work | contract in [`cell/`](./cell), implementations in [`executor/`](./executor) | authoring: `http` (ollama, vLLM, llama.cpp server, hosted APIs), `command` (llama.cpp CLI, any local wrapper), `harness` (Claude Code or anything shaped like it), `none`. checking: `subprocess`, `container`, `nix` |
 | **Artifact store** — the only other adapter, a sink | [`artifact/`](./artifact) | local CAS, plus a command-driven remote for OCI registries and S3-compatible stores |
 
 This used to be a model-runtime adapter *and* a build-sandbox adapter. They had
@@ -817,6 +817,59 @@ merging them looks reasonable.
 Note that an executor may *declare* `effectful` as a property. That is not
 authority to act: it says what kind of thing the executor is, while what it may
 do still comes from a lease.
+
+### A harness is just an executor, which was the whole bet
+
+`§4.5`'s wiring table has two rows, and until recently only one existed:
+everything ran in the cell's process, answered once, and returned text. A
+harness does none of those. It gets a directory, edits files in it, loops on
+what it sees, and talks to varvig over a socket while it works.
+
+The fold's claim was that adding one should need no new interface, no new
+package and no new config kind. It held, with two additions that are rows in a
+table rather than concepts:
+
+- `Request` gained `Dir` and `Socket`, because the wiring an executor gets is
+  proportional to what it declares and nothing before declared these.
+- Properties gained `edits_in_place`, because "my response is a report" and "my
+  response is content to apply" are different contracts and a caller cannot
+  guess which one it holds.
+
+Neither is a case in a switch. The loop reads properties; it still cannot ask
+what an executor *is*, and the guard still fails the build on any attempt to.
+
+**`edits_in_place` is the one that bites silently.** A harness edits `src/a.go`
+and then describes the edit in its summary, as any harness reporting its work
+naturally would — so a caller parsing that summary as content overwrites the file
+with the prose description of it, and the tests then measure something nobody
+wrote. There is a vector for exactly this, with a report written in the shape the
+parser accepts.
+
+For such an executor, "did anything happen" is answered by asking varvig what
+changed. It has to be asked: `varvig commit` on a clean tree succeeds and records
+an **empty change**, so committing blind would fill the speculation pool with
+empty candidates that other cells would then score. What it changed is held to
+the ticket's declared write set exactly as parsed output is.
+
+### The tool channel, and what it bounds
+
+**Authority attaches to the tool channel, never to the model.** An executor
+declaring `tools_attached` gets the task's MCP socket — scoped and propose-only,
+exactly like the credential it belongs to — so whatever it asks varvig to do
+through it is bounded by what varvig already granted the task.
+
+A tool-taking executor handed no socket is **refused**, not run toolless: it
+would do its work by guessing at a repository it cannot read, and bill for it.
+An executor declaring no tools is handed no socket even when one exists, because
+a credential nobody decided to give it is not a convenience.
+
+Core serves a per-task socket only while `varvig daemon` is running, so a cell
+configured with a tool-taking executor needs one. A cell whose executors take no
+tools needs nothing and notices nothing.
+
+And note what running in a checkout is *not*: a sandbox. The subprocess runs
+with the cell's user and the cell's filesystem access, confined to the checkout
+by convention and its own behaviour. The confinement that is real is the socket.
 
 ### Properties, not kinds
 
@@ -1410,6 +1463,7 @@ The spec's §10, and what shipped for each step:
 | 17. Resolution: which existing provider fits | `robe/resolve.go` |
 | 18. Decision tasks | `decide/` |
 | 19. Procurement: what the factory should acquire | `robe/procure.go` |
+| 20. The harness executor — §4.5's second wiring row | `executor/harness.go`, `cell.ExecutorProperties.EditsInPlace` |
 
 ## Known gaps
 

@@ -784,21 +784,73 @@ func (c *Cell) attempt(ctx context.Context, t claim.Ticket, n int, offline bool)
 		}
 	}()
 
-	// Authoring. The budget check happened in the claim policy; the spend is
-	// recorded here, after the call, from what the runtime actually reported.
-	resp, err := c.Authoring.Author(ctx, executor.Request{
+	// The wiring an executor gets is proportional to what it declares (§4.5),
+	// which is why this reads properties rather than asking what it holds.
+	props := c.Authoring.Properties()
+	if props.ToolsAttached && task.Socket == "" {
+		// Refused rather than run toolless. A harness with no tool channel is
+		// not a harness having a quiet day: it is one that will do its work by
+		// guessing at a repository it cannot read, and bill for it.
+		return AttemptResult{}, fmt.Errorf(
+			"authoring executor %s takes tools and this task has no MCP socket; core serves one per task only while `varvig daemon` is running",
+			c.Authoring.Name())
+	}
+
+	req := executor.Request{
 		Task:    t.ID,
 		Intent:  t.Spec,
 		Attempt: n,
 		Context: c.readContext(task.Dir, t.Scope),
-	})
+	}
+	if props.EditsInPlace {
+		req.Dir = task.Dir
+		// An in-place executor reads the checkout itself, so sending file
+		// contents too would pay twice for the same bytes — once in tokens,
+		// once in the chance the two copies disagree.
+		req.Context = nil
+	}
+	if props.ToolsAttached {
+		req.Socket = task.Socket
+	}
+
+	// Authoring. The budget check happened in the claim policy; the spend is
+	// recorded here, after the call, from what the runtime actually reported.
+	resp, err := c.Authoring.Author(ctx, req)
 	if err != nil {
 		return AttemptResult{}, fmt.Errorf("authoring: %w", err)
 	}
 	cost := c.Ledger.Spend(c.now(), offline, resp.TokensIn, resp.TokensOut)
 
-	written, err := ApplyOutput(task.Dir, resp.Text, t.Scope.Writes)
-	if err != nil {
+	var written []string
+	if props.EditsInPlace {
+		// Its response is a report of work already done, not content to apply.
+		// Parsing it would overwrite the files it just wrote with its own prose
+		// description of them, so the question "what changed" goes to varvig,
+		// which watched the directory rather than being told about it.
+		//
+		// Asking is also the only way to tell "the harness did nothing" from
+		// "the harness did something": `varvig commit` on a clean tree succeeds
+		// and records an empty change, so committing blind would fill the
+		// speculation pool with empty candidates.
+		if written, err = c.Project.Changed(task.Dir); err != nil {
+			return AttemptResult{}, fmt.Errorf("reading what %s changed: %w", c.Authoring.Name(), err)
+		}
+		// The same write-set check ApplyOutput makes, because the risk is the
+		// same and does not care which executor produced it. An attempt that
+		// touched paths outside the ticket's declared write set is a change
+		// claiming one scope and holding another, and varvig serializes on the
+		// claim — so the overlap it computed for this ticket was computed
+		// against the wrong set.
+		//
+		// Refused rather than trimmed: the files are already on disk, and
+		// committing the subset that happens to be in scope would land half of
+		// whatever the harness was doing.
+		for _, path := range written {
+			if err := checkPath(path, t.Scope.Writes); err != nil {
+				return AttemptResult{}, fmt.Errorf("%s wrote outside the ticket's scope: %w", c.Authoring.Name(), err)
+			}
+		}
+	} else if written, err = ApplyOutput(task.Dir, resp.Text, t.Scope.Writes); err != nil {
 		return AttemptResult{}, err
 	}
 	if len(written) == 0 {

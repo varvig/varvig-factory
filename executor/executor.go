@@ -31,19 +31,22 @@
 // build on any type assertion or type switch over a type from this package,
 // outside this package.
 //
-// # What is not built yet
+// # Both wiring rows now exist
 //
-// §4.5's wiring table has two rows and only one of them exists. Everything here
-// runs **in the cell's process**: one call, no checkout, no subprocess, no MCP
-// socket. The `tools_attached: true` row — a sandboxed subprocess with a sparse
-// checkout and a per-task socket at /run/varvig/task-<id>.sock — has no
-// implementation, so ToolsAttached is a property an executor may declare and
-// nothing yet acts on.
+// §4.5's table has two. HTTP, Command and None are the first: one call, in the
+// cell's process, no checkout and no socket. Harness is the second: a
+// subprocess with the task checkout as its working directory and the task's MCP
+// socket on its environment.
 //
-// That is worth stating rather than leaving to be discovered, because the
-// property being *declarable* is what makes the missing row an addition instead
-// of a redesign: whoever builds it branches on ToolsAttached, and no existing
-// executor changes.
+// Adding the second changed no existing executor and added no case to any
+// switch, which was the claim the fold rested on. What it did add is two fields
+// on Request (Dir, Socket) and one property (EditsInPlace) — a wider table, not
+// a new concept.
+//
+// One thing the second row is **not**, despite §4.5 calling it sandboxed: a
+// sandbox. The subprocess runs with this cell's user and filesystem access, and
+// the checkout confines it only by convention. The confinement that is real is
+// the socket, which is scoped and propose-only.
 package executor
 
 import (

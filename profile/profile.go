@@ -68,7 +68,7 @@ func (d Duration) D(fallback time.Duration) time.Duration {
 // InferenceConfig names a model runtime. Kind selects an adapter, never a tier:
 // "http" serves ollama, vLLM, llama.cpp's server and a hosted API alike.
 type InferenceConfig struct {
-	// Kind is "none", "http", or "command".
+	// Kind is "none", "http", "command", or "harness".
 	Kind string `json:"kind"`
 	// Tier is what the cell advertises (CELL.md §3). It must agree with Kind:
 	// "none" with a runtime, or a runtime with tier none, is a configuration
@@ -89,10 +89,26 @@ type InferenceConfig struct {
 	AuthHeader   string `json:"auth_header,omitempty"`
 	AuthValueEnv string `json:"auth_value_env,omitempty"`
 
-	// Path, Args and VersionArgs configure the "command" kind.
+	// Path, Args and VersionArgs configure the "command" and "harness" kinds.
 	Path        string   `json:"path,omitempty"`
 	Args        []string `json:"args,omitempty"`
 	VersionArgs []string `json:"version_args,omitempty"`
+
+	// PromptArg names the flag a harness takes its intent with, e.g. "-p".
+	// Empty sends the intent on stdin, which is the safer default: a spec is
+	// arbitrary text and argv has limits it can exceed.
+	PromptArg string `json:"prompt_arg,omitempty"`
+	// SocketEnv is the environment variable the task MCP socket is passed to a
+	// harness in, e.g. "VARVIG_MCP_SOCKET".
+	//
+	// Setting it is what makes the harness declare ToolsAttached, and what a
+	// cell then requires before it will run one: a harness with no tool channel
+	// works by guessing at a repository it cannot read, and bills for it. Core
+	// serves a per-task socket only while `varvig daemon` is running, so a cell
+	// configured with this needs one.
+	//
+	// Leave it empty for a harness that works from the checkout alone.
+	SocketEnv string `json:"socket_env,omitempty"`
 
 	Temperature float64 `json:"temperature,omitempty"`
 	TopP        float64 `json:"top_p,omitempty"`
@@ -567,16 +583,22 @@ func (c Config) Validate() error {
 			return fmt.Errorf("profile: executor.kind is %q but executor.tier is %q; a cell with no runtime must advertise tier %q",
 				c.Inference.Kind, c.Inference.Tier, cell.TierNone)
 		}
-	case "http", "command":
+	case "http", "command", "harness":
 		if c.Inference.Tier == cell.TierNone {
 			return fmt.Errorf("profile: executor.kind is %q but executor.tier is %q; a cell with a runtime must advertise the tier it is",
 				c.Inference.Kind, cell.TierNone)
 		}
+		// A harness is included here even though its Fragment stays quiet about
+		// a model it cannot prove. The two are different claims: the fragment
+		// records what was *measured*, while the capabilities object advertises
+		// what this cell can do, and other cells read the advertisement to
+		// decide what to expect. A cell that advertised a tier and named
+		// nothing would be refused by the contract later with a worse message.
 		if c.Inference.Model == "" {
 			return fmt.Errorf("profile: executor.kind is %q but no model is named", c.Inference.Kind)
 		}
 	default:
-		return fmt.Errorf("profile: unknown executor.kind %q (want none, http or command)", c.Inference.Kind)
+		return fmt.Errorf("profile: unknown executor.kind %q (want none, http, command or harness)", c.Inference.Kind)
 	}
 	switch strings.ToLower(c.Sandbox.Kind) {
 	case "", "subprocess":
@@ -806,6 +828,19 @@ func (c Config) authoring() (executor.Authoring, error) {
 			Model:        c.Inference.Model,
 			ModelVersion: c.Inference.ModelVersion,
 			Params:       c.params(),
+		}, nil
+	case "harness":
+		// No Params: sampling belongs to whatever the harness runs, and it is
+		// configured there. Recording params this cell cannot set would put a
+		// claim in the environment descriptor that nothing measured.
+		return &executor.Harness{
+			Path:         c.Inference.Path,
+			Args:         c.Inference.Args,
+			PromptArg:    c.Inference.PromptArg,
+			VersionArgs:  c.Inference.VersionArgs,
+			Model:        c.Inference.Model,
+			ModelVersion: c.Inference.ModelVersion,
+			SocketEnv:    c.Inference.SocketEnv,
 		}, nil
 	}
 	return nil, fmt.Errorf("profile: unknown executor.kind %q", c.Inference.Kind)

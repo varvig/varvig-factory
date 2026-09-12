@@ -352,3 +352,59 @@ func TestClassAndInferenceAreOrthogonal(t *testing.T) {
 		}
 	})
 }
+
+// TestAHarnessIsConfigurationLikeEverythingElse is the fold's claim at the
+// configuration layer: a new shape of executor is a different value for
+// executor.kind, not a new section, a new file, or a new code path outside the
+// table that builds executors.
+func TestAHarnessIsConfigurationLikeEverythingElse(t *testing.T) {
+	c := Mini("mini-a")
+	c.Inference = InferenceConfig{
+		Kind:        "harness",
+		Tier:        cell.TierLarge,
+		Path:        "/usr/local/bin/claude",
+		Args:        []string{"--permission-mode", "acceptEdits"},
+		PromptArg:   "-p",
+		VersionArgs: []string{"--version"},
+		Model:       "harness-model",
+		SocketEnv:   "VARVIG_MCP_SOCKET",
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a harness cell is not valid configuration: %v", err)
+	}
+
+	e, err := c.authoring()
+	if err != nil {
+		t.Fatal(err)
+	}
+	props := e.Properties()
+	if !props.EditsInPlace || !props.ToolsAttached || !props.Loops {
+		t.Fatalf("properties = %+v; the configured harness does not declare what it is like", props)
+	}
+	if props.Deterministic {
+		t.Fatal("a harness declared itself deterministic; a transaction would then be free to re-run it")
+	}
+
+	// Without a socket variable it declares no tools, and the cell will not
+	// then demand a daemon. That is a real deployment — a harness working from
+	// the checkout alone — not a degraded one.
+	c.Inference.SocketEnv = ""
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	e, err = c.authoring()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Properties().ToolsAttached {
+		t.Fatal("a harness with no socket variable declared ToolsAttached, so its cell will refuse to run without a daemon")
+	}
+
+	// And the advertisement still has to be coherent: a cell claiming a tier
+	// while naming nothing would be refused by the cell contract later, with a
+	// worse message than this one.
+	c.Inference.Model = ""
+	if err := c.Validate(); err == nil {
+		t.Fatal("a harness cell advertising a tier named no model and was accepted")
+	}
+}
