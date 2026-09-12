@@ -8,6 +8,7 @@
 package guard
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -351,4 +352,100 @@ func TestNoFloatingPointMoney(t *testing.T) {
 			return true
 		})
 	}
+}
+
+// TestNoBranchingOnExecutorKind is FACTORY.md §4.1: executors declare
+// properties, not kinds, and "a new executor must never require a new Factory
+// concept."
+//
+// The temptation this exists to catch is specific and arrives with the first
+// harness executor. A harness needs a checkout, a subprocess and an MCP socket
+// where a one-shot model call needs none of them, and there are two ways to
+// write that. One reads the declared property:
+//
+//	if e.Properties().ToolsAttached { … }
+//
+// The other asks what it is:
+//
+//	if h, ok := e.(*executor.Harness); ok { … }
+//
+// Both work for the executor in front of you. Only the first works for the one
+// somebody adds next, and the second is how the fold this package guards gets
+// quietly undone — a list of cases growing one entry per vendor is the
+// four-adapter model coming back under a different name.
+//
+// So: no type assertion or type switch on anything from the executor package,
+// outside the package itself. Constructing a concrete executor is fine and is
+// what wiring is for; interrogating one at runtime is not.
+func TestNoBranchingOnExecutorKind(t *testing.T) {
+	root := moduleRoot(t)
+
+	var violations []string
+	fset := token.NewFileSet()
+	for _, path := range goFiles(t, root, "executor") {
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		// Only files that mention the package can assert on its types, so skip
+		// the rest rather than walking every tree in the module.
+		imports := false
+		for _, im := range f.Imports {
+			if strings.HasSuffix(strings.Trim(im.Path.Value, `"`), "/executor") {
+				imports = true
+			}
+		}
+		if !imports {
+			continue
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.TypeAssertExpr:
+				// x.(T) — the type is nil for a type switch's x.(type), which
+				// the case below handles.
+				if v.Type != nil && namesExecutorType(v.Type) {
+					violations = append(violations, fmt.Sprintf("%s:%d: type assertion on an executor type",
+						relPath(root, path), fset.Position(v.Pos()).Line))
+				}
+			case *ast.TypeSwitchStmt:
+				ast.Inspect(v.Body, func(n ast.Node) bool {
+					cl, ok := n.(*ast.CaseClause)
+					if !ok {
+						return true
+					}
+					for _, e := range cl.List {
+						if namesExecutorType(e) {
+							violations = append(violations, fmt.Sprintf("%s:%d: type switch case on an executor type",
+								relPath(root, path), fset.Position(e.Pos()).Line))
+						}
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+	if len(violations) > 0 {
+		t.Fatalf("branching on what an executor is rather than what it declares (§4.1):\n  %s\n"+
+			"Read the property instead — Properties().ToolsAttached, .Deterministic, .Effectful — so the next\n"+
+			"executor needs no case of its own.", strings.Join(violations, "\n  "))
+	}
+}
+
+// namesExecutorType reports whether an expression names a type from the
+// executor package, through any number of pointers.
+func namesExecutorType(e ast.Expr) bool {
+	for {
+		star, ok := e.(*ast.StarExpr)
+		if !ok {
+			break
+		}
+		e = star.X
+	}
+	sel, ok := e.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "executor"
 }

@@ -1,4 +1,4 @@
-package sandbox
+package executor
 
 import (
 	"context"
@@ -93,7 +93,7 @@ func TestRunClassifiesOutcomes(t *testing.T) {
 	e := Subprocess(nil, nil)
 	ctx := context.Background()
 
-	pass, err := e.Run(ctx, Job{Name: "ok", Dir: dir, Command: []string{"true"}})
+	pass, err := e.Check(ctx, Job{Name: "ok", Dir: dir, Command: []string{"true"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestRunClassifiesOutcomes(t *testing.T) {
 
 	// A nonzero exit is a measurement, not a malfunction: StatusFail and a nil
 	// error.
-	fail, err := e.Run(ctx, Job{Name: "no", Dir: dir, Command: []string{"false"}})
+	fail, err := e.Check(ctx, Job{Name: "no", Dir: dir, Command: []string{"false"}})
 	if err != nil {
 		t.Fatalf("a failing check returned an error: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestRunClassifiesOutcomes(t *testing.T) {
 
 	// A binary that will not start is StatusError: the code did not fail, the
 	// harness did.
-	broken, err := e.Run(ctx, Job{Name: "gone", Dir: dir, Command: []string{"definitely-not-a-real-binary-xyz"}})
+	broken, err := e.Check(ctx, Job{Name: "gone", Dir: dir, Command: []string{"definitely-not-a-real-binary-xyz"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestRunClassifiesOutcomes(t *testing.T) {
 func TestRunTimeoutIsErrorNotFailure(t *testing.T) {
 	// A slow machine must not look like broken code (CELL.md §4.1).
 	e := Subprocess(nil, nil)
-	res, err := e.Run(context.Background(), Job{
+	res, err := e.Check(context.Background(), Job{
 		Name:    "slow",
 		Dir:     t.TempDir(),
 		Command: []string{"sleep", "5"},
@@ -148,7 +148,7 @@ func TestRunUsesTheJobDirectory(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := Subprocess(nil, nil)
-	res, err := e.Run(context.Background(), Job{Name: "ls", Dir: dir, Command: []string{"cat", "marker"}})
+	res, err := e.Check(context.Background(), Job{Name: "ls", Dir: dir, Command: []string{"cat", "marker"}})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,4 +1,4 @@
-package inference
+package executor
 
 import (
 	"bytes"
@@ -14,7 +14,7 @@ import (
 	"github.com/varvig/varvig-factory/cell"
 )
 
-// HTTPRuntime drives a model over HTTP using the chat-completions request
+// HTTP drives a model over HTTP using the chat-completions request
 // shape that ollama, vLLM, llama.cpp's server and hosted APIs all implement.
 // One adapter therefore covers three of the four rows in the §4 table, and the
 // difference between a Micro cell and a Mini cell is an endpoint and a model
@@ -24,7 +24,7 @@ import (
 // vendor SDK: this module has no third-party dependencies, and more to the
 // point, a vendor SDK in the adapter would be the vendor leaking through the
 // seam it exists to hide.
-type HTTPRuntime struct {
+type HTTP struct {
 	// Endpoint is the chat-completions URL, e.g.
 	// http://127.0.0.1:11434/v1/chat/completions.
 	Endpoint string
@@ -59,17 +59,25 @@ type HTTPRuntime struct {
 	fragErr  error
 }
 
-// Name implements Runtime.
-func (h *HTTPRuntime) Name() string { return "http" }
+// Name implements Authoring.
+func (h *HTTP) Name() string { return "http" }
 
-func (h *HTTPRuntime) client() *http.Client {
+// Properties implements Executor. Identical to the subprocess model executor's,
+// which is the point: where the model runs is not a property, and a hosted API
+// and a local server differ in latency and billing rather than in anything the
+// cell has to branch on (§3).
+func (h *HTTP) Properties() Properties {
+	return Properties{ConsumesLease: true}
+}
+
+func (h *HTTP) client() *http.Client {
 	if h.Client != nil {
 		return h.Client
 	}
 	return &http.Client{Timeout: 30 * time.Minute}
 }
 
-// Fragment implements Runtime by probing VersionURL once and caching the
+// Fragment implements Authoring by probing VersionURL once and caching the
 // result. Caching is what makes it deterministic within a run; probing is what
 // makes it a measurement rather than a claim.
 //
@@ -78,12 +86,12 @@ func (h *HTTPRuntime) client() *http.Client {
 // report. The fallback matters: it keeps the adapter vendor-neutral — an
 // endpoint that reports its identity in some other shape still yields a stable,
 // comparable token instead of an adapter that refuses to work with it.
-func (h *HTTPRuntime) Fragment(ctx context.Context) (cell.Fragment, error) {
+func (h *HTTP) Fragment(ctx context.Context) (cell.Fragment, error) {
 	h.once.Do(func() { h.fragment, h.fragErr = h.probe(ctx) })
 	return h.fragment, h.fragErr
 }
 
-func (h *HTTPRuntime) probe(ctx context.Context) (cell.Fragment, error) {
+func (h *HTTP) probe(ctx context.Context) (cell.Fragment, error) {
 	if h.Model == "" {
 		return cell.Fragment{}, fmt.Errorf("inference: http runtime has no model configured")
 	}
@@ -142,7 +150,7 @@ func extractVersion(body []byte) string {
 	return ""
 }
 
-func (h *HTTPRuntime) auth(req *http.Request) {
+func (h *HTTP) auth(req *http.Request) {
 	if h.AuthHeader != "" && h.AuthValue != "" {
 		req.Header.Set(h.AuthHeader, h.AuthValue)
 	}
@@ -178,8 +186,8 @@ type chatResponse struct {
 	} `json:"error"`
 }
 
-// Generate implements Runtime.
-func (h *HTTPRuntime) Generate(ctx context.Context, r Request) (Response, error) {
+// Author implements Authoring.
+func (h *HTTP) Author(ctx context.Context, r Request) (Response, error) {
 	if h.Endpoint == "" {
 		return Response{}, fmt.Errorf("inference: http runtime has no endpoint configured")
 	}

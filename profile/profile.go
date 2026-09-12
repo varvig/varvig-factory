@@ -28,11 +28,10 @@ import (
 	"github.com/varvig/varvig-factory/budget"
 	"github.com/varvig/varvig-factory/cell"
 	"github.com/varvig/varvig-factory/effect"
+	"github.com/varvig/varvig-factory/executor"
 	"github.com/varvig/varvig-factory/gate"
-	"github.com/varvig/varvig-factory/inference"
 	"github.com/varvig/varvig-factory/loop"
 	"github.com/varvig/varvig-factory/promote"
-	"github.com/varvig/varvig-factory/sandbox"
 	"github.com/varvig/varvig-factory/varvigcli"
 )
 
@@ -101,7 +100,7 @@ type InferenceConfig struct {
 	MaxTokens   int     `json:"max_tokens,omitempty"`
 }
 
-// SandboxConfig names a build sandbox.
+// SandboxConfig names a build executor.
 type SandboxConfig struct {
 	// Kind is "subprocess", "container", or "nix".
 	Kind string `json:"kind"`
@@ -111,7 +110,7 @@ type SandboxConfig struct {
 	Image string `json:"image,omitempty"`
 	// Installable is the nix flake reference, e.g. ".#ci".
 	Installable string `json:"installable,omitempty"`
-	// Probes measure toolchain versions inside the sandbox. "go" is expanded to
+	// Probes measure toolchain versions inside the executor. "go" is expanded to
 	// the built-in Go probe.
 	Probes []ProbeConfig `json:"probes,omitempty"`
 	// Flags are outcome-affecting flags recorded in the environment.
@@ -543,38 +542,38 @@ func (c Config) Validate() error {
 	switch strings.ToLower(c.Inference.Kind) {
 	case "", "none":
 		if c.Inference.Tier != cell.TierNone {
-			return fmt.Errorf("profile: inference.kind is %q but inference.tier is %q; a cell with no runtime must advertise tier %q",
+			return fmt.Errorf("profile: executor.kind is %q but executor.tier is %q; a cell with no runtime must advertise tier %q",
 				c.Inference.Kind, c.Inference.Tier, cell.TierNone)
 		}
 	case "http", "command":
 		if c.Inference.Tier == cell.TierNone {
-			return fmt.Errorf("profile: inference.kind is %q but inference.tier is %q; a cell with a runtime must advertise the tier it is",
+			return fmt.Errorf("profile: executor.kind is %q but executor.tier is %q; a cell with a runtime must advertise the tier it is",
 				c.Inference.Kind, cell.TierNone)
 		}
 		if c.Inference.Model == "" {
-			return fmt.Errorf("profile: inference.kind is %q but no model is named", c.Inference.Kind)
+			return fmt.Errorf("profile: executor.kind is %q but no model is named", c.Inference.Kind)
 		}
 	default:
-		return fmt.Errorf("profile: unknown inference.kind %q (want none, http or command)", c.Inference.Kind)
+		return fmt.Errorf("profile: unknown executor.kind %q (want none, http or command)", c.Inference.Kind)
 	}
 	switch strings.ToLower(c.Sandbox.Kind) {
 	case "", "subprocess":
 	case "container":
 		if c.Sandbox.Image == "" {
-			return fmt.Errorf("profile: sandbox.kind is container but no image is named")
+			return fmt.Errorf("profile: executor.kind is container but no image is named")
 		}
 		if !strings.Contains(c.Sandbox.Image, "@") {
 			// A tag is mutable. A tag-pinned sandbox publishes a stable
 			// environment hash while the ground under it moves, which makes every
 			// cross-cell comparison against it quietly wrong.
-			return fmt.Errorf("profile: sandbox.image %q is not digest-pinned; use image@sha256:… so the environment hash means something", c.Sandbox.Image)
+			return fmt.Errorf("profile: executor.image %q is not digest-pinned; use image@sha256:… so the environment hash means something", c.Sandbox.Image)
 		}
 	case "nix":
 		if c.Sandbox.Installable == "" {
-			return fmt.Errorf("profile: sandbox.kind is nix but no installable is named")
+			return fmt.Errorf("profile: executor.kind is nix but no installable is named")
 		}
 	default:
-		return fmt.Errorf("profile: unknown sandbox.kind %q (want subprocess, container or nix)", c.Sandbox.Kind)
+		return fmt.Errorf("profile: unknown executor.kind %q (want subprocess, container or nix)", c.Sandbox.Kind)
 	}
 	switch strings.ToLower(c.Artifacts.Kind) {
 	case "", "local":
@@ -660,11 +659,11 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		return Built{}, err
 	}
 
-	runtime, err := c.runtime()
+	author, err := c.authoring()
 	if err != nil {
 		return Built{}, err
 	}
-	box, err := c.sandbox()
+	check, err := c.checking()
 	if err != nil {
 		return Built{}, err
 	}
@@ -682,8 +681,8 @@ func (c Config) Wire(v varvigcli.Varvig) (Built, error) {
 		Capabilities:       c.Capabilities(),
 		Factory:            factory,
 		Project:            project,
-		Inference:          runtime,
-		Sandbox:            box,
+		Authoring:          author,
+		Checking:           check,
 		Artifacts:          store,
 		Ledger:             ledger,
 		Rendezvous:         loop.Peers(c.Rendezvous),
@@ -760,12 +759,12 @@ func (c Config) switchPath() string {
 	return c.statePath("promotion.json")
 }
 
-func (c Config) runtime() (inference.Runtime, error) {
+func (c Config) authoring() (executor.Authoring, error) {
 	switch strings.ToLower(c.Inference.Kind) {
 	case "", "none":
-		return inference.None{}, nil
+		return executor.None{}, nil
 	case "http":
-		return &inference.HTTPRuntime{
+		return &executor.HTTP{
 			Endpoint:     c.Inference.Endpoint,
 			VersionURL:   c.Inference.VersionURL,
 			Model:        c.Inference.Model,
@@ -776,7 +775,7 @@ func (c Config) runtime() (inference.Runtime, error) {
 			Params:       c.params(),
 		}, nil
 	case "command":
-		return &inference.CommandRuntime{
+		return &executor.Command{
 			Path:         c.Inference.Path,
 			Args:         c.Inference.Args,
 			VersionArgs:  c.Inference.VersionArgs,
@@ -785,42 +784,42 @@ func (c Config) runtime() (inference.Runtime, error) {
 			Params:       c.params(),
 		}, nil
 	}
-	return nil, fmt.Errorf("profile: unknown inference.kind %q", c.Inference.Kind)
+	return nil, fmt.Errorf("profile: unknown executor.kind %q", c.Inference.Kind)
 }
 
-func (c Config) params() inference.Params {
-	return inference.Params{
+func (c Config) params() executor.Params {
+	return executor.Params{
 		Temperature: c.Inference.Temperature,
 		TopP:        c.Inference.TopP,
 		Seed:        c.Inference.Seed,
 	}
 }
 
-func (c Config) probes() []sandbox.Probe {
-	var out []sandbox.Probe
+func (c Config) probes() []executor.Probe {
+	var out []executor.Probe
 	for _, p := range c.Sandbox.Probes {
 		// "go" with no command expands to the built-in probe, which knows to
 		// strip the platform suffix `go version` appends.
 		if strings.EqualFold(p.Key, "go") && len(p.Command) == 0 {
-			out = append(out, sandbox.GoProbes()...)
+			out = append(out, executor.GoProbes()...)
 			continue
 		}
-		out = append(out, sandbox.Probe{Key: p.Key, Command: p.Command})
+		out = append(out, executor.Probe{Key: p.Key, Command: p.Command})
 	}
 	return out
 }
 
-func (c Config) sandbox() (sandbox.Sandbox, error) {
-	var box *sandbox.Exec
+func (c Config) checking() (executor.Checking, error) {
+	var box *executor.Exec
 	switch strings.ToLower(c.Sandbox.Kind) {
 	case "", "subprocess":
-		box = sandbox.Subprocess(c.probes(), c.Sandbox.Flags)
+		box = executor.Subprocess(c.probes(), c.Sandbox.Flags)
 	case "container":
-		box = sandbox.Container(c.Sandbox.Runner, c.Sandbox.Image, c.probes(), c.Sandbox.Flags)
+		box = executor.Container(c.Sandbox.Runner, c.Sandbox.Image, c.probes(), c.Sandbox.Flags)
 	case "nix":
-		box = sandbox.Nix(c.Sandbox.Installable, c.probes(), c.Sandbox.Flags)
+		box = executor.Nix(c.Sandbox.Installable, c.probes(), c.Sandbox.Flags)
 	default:
-		return nil, fmt.Errorf("profile: unknown sandbox.kind %q", c.Sandbox.Kind)
+		return nil, fmt.Errorf("profile: unknown executor.kind %q", c.Sandbox.Kind)
 	}
 	box.Platform = c.Sandbox.Platform
 	if d := c.Sandbox.Timeout.D(0); d > 0 {

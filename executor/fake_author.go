@@ -1,4 +1,4 @@
-package inference
+package executor
 
 import (
 	"context"
@@ -7,18 +7,18 @@ import (
 	"github.com/varvig/varvig-factory/cell"
 )
 
-// Fake is a deterministic Runtime for tests and for the simulator. It is in
+// FakeAuthor is a deterministic Authoring for tests and for the simulator. It is in
 // the non-test build for the same reason tracker.Mem is in varvig-connectors':
 // the whole cell lifecycle has to be exercisable with no GPU, no server, and no
 // spend, or the §9 test suite would only ever run on the machine that has one.
-type Fake struct {
-	// Reply is returned verbatim by Generate. If Replies is non-empty it takes
+type FakeAuthor struct {
+	// Reply is returned verbatim by Author. If Replies is non-empty it takes
 	// precedence, indexed by attempt number (1-based), so a test can make two
 	// attempts differ — which is what makes selection between duplicates
 	// testable at all.
 	Reply   string
 	Replies []string
-	// Err, if set, is returned by Generate.
+	// Err, if set, is returned by Author.
 	Err error
 	// Model and Version appear in the fragment.
 	Model, Version string
@@ -31,16 +31,19 @@ type Fake struct {
 	// adapter that cannot describe itself.
 	Indescribable bool
 
-	// Calls counts Generate invocations, so a test can assert that a halted
+	// Calls counts Author invocations, so a test can assert that a halted
 	// cell stopped spending rather than merely stopped reporting.
 	Calls int
 }
 
-// Name implements Runtime.
-func (f *Fake) Name() string { return "fake" }
+// Name implements Authoring.
+func (f *FakeAuthor) Name() string { return "fake" }
 
-// Fragment implements Runtime.
-func (f *Fake) Fragment(context.Context) (cell.Fragment, error) {
+// Properties implements Executor.
+func (f *FakeAuthor) Properties() Properties { return Properties{ConsumesLease: true} }
+
+// Fragment implements Authoring.
+func (f *FakeAuthor) Fragment(context.Context) (cell.Fragment, error) {
 	if f.Indescribable {
 		return cell.Fragment{}, fmt.Errorf("%w: fake configured as indescribable", ErrIndescribable)
 	}
@@ -58,8 +61,8 @@ func (f *Fake) Fragment(context.Context) (cell.Fragment, error) {
 	}, nil
 }
 
-// Generate implements Runtime.
-func (f *Fake) Generate(_ context.Context, r Request) (Response, error) {
+// Author implements Authoring.
+func (f *FakeAuthor) Author(_ context.Context, r Request) (Response, error) {
 	f.Calls++
 	if f.Err != nil {
 		return Response{}, f.Err

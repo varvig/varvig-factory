@@ -1,6 +1,6 @@
 # The Cell Contract
 
-*Normative. Version 8* — separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
+*Normative. Version 9* — folds the model-runtime and build-sandbox adapters into one executor seam (§6), separates cell class from inference and makes an unreachable runtime a decline rather than a refusal to start (§3), makes budgets optional and `effectful` independent of cost (§8.0), enforces the envelope's quantity and rate ceilings, adds the interface registry and derived reputation, counts money in minor units (§8.1), adds rendezvous sets and the repository split (§2.1), authority (§8.1),
 effectful capabilities (§8.2), and the implementation status in §11. Section references in the form §N.N refer
 to `FACTORY.md` (Design Notes VIII) unless another document is named.
 
@@ -407,22 +407,61 @@ where it fails safely rather than overwriting.
 
 ---
 
-## 6. Adapter seams
+## 6. Seams
 
-Three seams, and everything hardware- or vendor-shaped lives behind them, so
-that neither varvig nor Factory's core loop ever learns about CUDA,
-quantization, or container runtimes (§4).
+**Two seams, not four** (§4). Everything hardware- or vendor-shaped lives behind
+them, so that neither varvig nor the cell loop ever learns about CUDA,
+quantization, or container runtimes.
 
 | Seam | Contributes to the environment |
 |---|---|
-| Model runtime | `model` and the inference toolchain entry |
-| Build sandbox | `platform`, the toolchain versions it exposes, outcome-affecting flags |
-| Artifact store | the `container` reference, when the sandbox has one |
+| **Executor** — anything that performs work | `model` and the inference toolchain entry when it authors; `platform`, toolchain versions and outcome-affecting flags when it checks |
+| **Artifact store** — the only other adapter, a sink | the `container` reference, when the executor has one |
 
-Each adapter reports a deterministic fragment (§4.2), and an adapter reports its
-fragment **from the environment it will actually run in** — a fragment read from
-configuration rather than from the running toolchain is a claim, not a
-measurement.
+There is no model-runtime seam separate from a build-sandbox seam. They were two
+adapters with one shape — name yourself, describe your environment, do a unit of
+work — and keeping them apart made "how does a cell run a model" a different
+question from "how does a cell run a test". A harness would then have been a
+third answer to a question that should only have one.
+
+The rule that replaces them: **a new executor must never require a new
+concept.** A Claude Code harness is an executor whose properties say it loops and
+takes tools. A CNC machine is an executor whose properties say it is effectful.
+Neither needs an interface, a package, or a config section of its own.
+
+### 6.1 Properties, not kinds
+
+An executor declares what it is *like*, never what it *is* (§4.1):
+
+| Property | Meaning |
+|---|---|
+| `loops` | Iterates on feedback, or answers once |
+| `tools_attached` | Receives a task MCP socket — the line between thinking and doing |
+| `deterministic` | Results are evidence-comparable and cacheable |
+| `consumes_lease` | Running it spends budget |
+| `effectful` | Real-world side effects — the §8.2 class, here just a property |
+
+Nothing branches on which executor it holds, and a guard fails the build if
+anything starts to: the wiring an executor gets is proportional to the
+properties it declares, so a new shape of executor changes a table of behaviour
+rather than a list of cases.
+
+`deterministic` is the load-bearing one. A checking executor is deterministic,
+which is what lets one cell's evidence license another cell's attempt (§6.3.1)
+and why a transaction may re-run it; an authoring executor is not, which is why
+one must never run inside anything that retries (§8.2 rule 7).
+
+### 6.2 Describing the environment
+
+Every executor reports a deterministic fragment (§4.2), **from the environment
+it will actually run in** — a fragment read from configuration rather than from
+the running toolchain is a claim, not a measurement.
+
+An executor that cannot describe itself reproducibly is refused, and the two
+roles are refused differently, which §3 explains: a cell whose *checking*
+executor cannot describe itself has nothing left to do, so it does not start; a
+cell whose *authoring* executor cannot answer declines to attempt and carries on
+with everything else.
 
 ---
 

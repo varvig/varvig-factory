@@ -1,10 +1,19 @@
-// Package sandbox is the build-sandbox seam (FACTORY.md §4). Container, nix and
-// plain-subprocess execution all reach the loop through one interface, and — the
-// point of the seam — through one implementation: an Exec whose Wrapper turns a
-// subprocess into a container run or a nix shell. There is no Container type
-// with its own code path, because a tier or an isolation mode that needs a
-// branch here is the abstraction having failed (§1.2).
-package sandbox
+// Checking executors: the ones that measure.
+//
+// Container, nix and plain-subprocess execution all reach the loop through one
+// interface and one implementation — an Exec whose Wrapper turns a subprocess
+// into a container run or a nix shell. There is no Container type with its own
+// code path, because an isolation mode that needs a branch here is the
+// abstraction having failed (§1.2), the same rule that made a separate model
+// adapter a mistake.
+//
+// A checking executor is **deterministic**, and that is the property that
+// matters most about it: its results are evidence-comparable, which is what
+// lets one cell's evidence license another cell's attempt (§6.3.1), and it is
+// the reason a transaction may safely re-run one where it may never re-run a
+// model (§4.4).
+
+package executor
 
 import (
 	"bytes"
@@ -20,11 +29,6 @@ import (
 
 	"github.com/varvig/varvig-factory/cell"
 )
-
-// ErrIndescribable is returned by a sandbox that cannot report a reproducible
-// environment fragment. Same rule as the model runtime: an adapter that cannot
-// describe itself cannot participate in cross-cell selection (§4).
-var ErrIndescribable = errors.New("sandbox: adapter cannot describe its environment reproducibly")
 
 // Job is one check to run.
 //
@@ -55,18 +59,6 @@ type Result struct {
 	// Output is the tail of combined stdout/stderr, for a human reading a
 	// failure. Never parsed for a verdict — Status is the verdict.
 	Output string
-}
-
-// Sandbox is the build-sandbox seam.
-type Sandbox interface {
-	Name() string
-	// Fragment reports the platform, toolchain versions and outcome-affecting
-	// flags of the environment jobs will actually run in (CELL.md §4.2, §6).
-	Fragment(ctx context.Context) (cell.Fragment, error)
-	// Run executes one job. A job that exits nonzero is a StatusFail result and
-	// a nil error: a failing test is a measurement, not a malfunction. Run
-	// returns an error only when the measurement could not be taken at all.
-	Run(ctx context.Context, job Job) (Result, error)
 }
 
 // Probe measures one toolchain's version by running a command inside the
@@ -130,7 +122,7 @@ type Exec struct {
 	fragErr  error
 }
 
-// Name implements Sandbox.
+// Name implements Checking.
 func (e *Exec) Name() string {
 	if e.Label != "" {
 		return e.Label
@@ -141,7 +133,15 @@ func (e *Exec) Name() string {
 	return "subprocess"
 }
 
-// Fragment implements Sandbox. It runs every probe once and caches the result:
+// Properties implements Executor. A build and test runner is **deterministic**
+// — its results are evidence-comparable and cacheable, which is what lets one
+// cell's evidence license another cell's attempt (§6.3.1) — and it spends no
+// budget: compute a cell already owns is not a lease.
+func (e *Exec) Properties() Properties {
+	return Properties{Deterministic: true}
+}
+
+// Fragment implements Checking. It runs every probe once and caches the result:
 // probing is what makes the fragment a measurement, caching is what makes it
 // deterministic within a run (FACTORY.md §9.4).
 func (e *Exec) Fragment(ctx context.Context) (cell.Fragment, error) {
@@ -192,8 +192,8 @@ func (e *Exec) probeAll(ctx context.Context) (cell.Fragment, error) {
 	}, nil
 }
 
-// Run implements Sandbox.
-func (e *Exec) Run(ctx context.Context, job Job) (Result, error) {
+// Run implements Checking.
+func (e *Exec) Check(ctx context.Context, job Job) (Result, error) {
 	if len(job.Command) == 0 {
 		return Result{}, fmt.Errorf("sandbox: job %q has no command", job.Name)
 	}
@@ -295,15 +295,6 @@ func (e *Exec) capture(ctx context.Context, dir string, command []string) (strin
 		return out.String(), fmt.Errorf("%s: %w: %s", strings.Join(argv, " "), err, tail(out.String(), 200))
 	}
 	return out.String(), nil
-}
-
-func firstLine(s string) string {
-	for _, line := range strings.Split(s, "\n") {
-		if t := strings.TrimSpace(line); t != "" {
-			return t
-		}
-	}
-	return ""
 }
 
 func tail(s string, n int) string {

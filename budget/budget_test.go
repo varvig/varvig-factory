@@ -113,7 +113,7 @@ func TestAnUnconfiguredBudgetIsUnenforcedNotZero(t *testing.T) {
 	//
 	// Both an entirely empty budget and one that configures unrelated things
 	// have to pass, because "I set a storage cap" is not a statement about
-	// inference.
+	// executor.
 	for _, b := range []Budget{{}, {StorageGB: 10}} {
 		l, err := NewLedger(b, "", day0)
 		if err != nil {

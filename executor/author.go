@@ -1,16 +1,23 @@
-// Package inference is the model-runtime seam (FACTORY.md §4). Everything
-// vendor- or hardware-shaped about running a model lives behind it, so neither
-// varvig nor Factory's core loop learns about CUDA, quantization, or a
-// particular vendor's request envelope.
+// Authoring executors: the ones that turn intent into a candidate change.
 //
-// There are two implementations and they cover all four rows of the spec's
-// table. ollama, vLLM and llama.cpp's server are HTTP endpoints speaking the
-// widely-implemented chat-completions shape, as are hosted APIs; llama.cpp's
-// CLI and any local wrapper script are subprocesses. Which one a cell uses, and
-// therefore whether it is Micro or Mini, is configuration — not a code path
-// (§1.2). If a tier ever needs a branch in this package, the abstraction has
-// failed.
-package inference
+// Everything vendor- or hardware-shaped about running a model lives behind this
+// seam, so neither varvig nor the cell loop learns about CUDA, quantization, or
+// a particular vendor's request envelope.
+//
+// Two implementations cover the field. ollama, vLLM and llama.cpp's server are
+// HTTP endpoints speaking the widely-implemented chat-completions shape, as are
+// hosted APIs; llama.cpp's CLI and any local wrapper script are subprocesses.
+// Which one a cell uses is configuration, not a code path — and note what it is
+// *not* evidence of: a hosted endpoint and a local server differ in latency and
+// billing, not in anything the cell branches on, which is why cell class says
+// nothing about inference (§3).
+//
+// A harness executor — Claude Code or equivalent — is another implementation of
+// this same interface and needs nothing else. That is the fold working: before
+// it, a harness would have been a third adapter beside a model runtime and a
+// build sandbox, three answers to one question.
+
+package executor
 
 import (
 	"context"
@@ -63,31 +70,14 @@ type Response struct {
 	Cost cell.Money
 }
 
-// Runtime is the model-runtime seam.
-type Runtime interface {
-	// Name identifies the adapter for logs and errors. Not part of the
-	// environment: the fragment is.
-	Name() string
-
-	// Fragment reports this adapter's slice of the environment descriptor
-	// (CELL.md §4.2, §6), measured from the runtime it will actually call.
-	//
-	// It must be deterministic across invocations, and it must be a
-	// measurement rather than a configured claim. An adapter that cannot
-	// describe itself reproducibly returns ErrIndescribable and the cell
-	// refuses to use it — emitting a guessed environment would make every
-	// downstream cross-cell comparison a comparison of guesses.
-	Fragment(ctx context.Context) (cell.Fragment, error)
-
-	// Generate runs one authoring request.
-	Generate(ctx context.Context, req Request) (Response, error)
-}
-
-// ErrIndescribable is returned by an adapter that cannot report a reproducible
-// environment fragment. It is a configuration error, surfaced at startup rather
-// than at the first attempt, because a cell that cannot describe its
-// environment cannot participate in cross-cell selection at all (§4).
-var ErrIndescribable = errors.New("inference: adapter cannot describe its environment reproducibly")
+// ErrIndescribable is returned by an executor that cannot report a reproducible
+// environment fragment.
+//
+// One error for every executor, because it is one rule: an executor that cannot
+// describe itself cannot participate in cross-cell selection at all (§4), and
+// that is as true of a test runner as of a model. Having had two of these, one
+// per adapter, was a small symptom of the same split this fold removes.
+var ErrIndescribable = errors.New("executor: cannot describe its environment reproducibly")
 
 // Params are the sampling parameters that affect output. They are recorded in
 // the environment descriptor's model.params field, canonically, so that two
@@ -128,19 +118,24 @@ func (p Params) String() string {
 // refuses to generate.
 //
 // This exists so that "no model" is a configuration rather than a nil check
-// scattered through the loop. A cell without RoleAttempt never calls Generate;
+// scattered through the loop. A cell without RoleAttempt never calls Author;
 // if a misconfiguration makes it, the refusal is explicit and names the reason.
 type None struct{}
 
-// Name implements Runtime.
+// Name implements Authoring.
 func (None) Name() string { return "none" }
 
-// Fragment implements Runtime. A cell with no model contributes no model field:
+// Properties implements Executor. A cell with no model authors nothing, so
+// every property is false — including ConsumesLease, which is the honest answer
+// for an executor that never runs.
+func (None) Properties() Properties { return Properties{} }
+
+// Fragment implements Authoring. A cell with no model contributes no model field:
 // build and test evidence must not carry one, or deterministic evidence would
 // look sampled (CELL.md §4.2).
 func (None) Fragment(context.Context) (cell.Fragment, error) { return cell.Fragment{}, nil }
 
-// Generate implements Runtime by refusing.
-func (None) Generate(context.Context, Request) (Response, error) {
+// Author implements Authoring by refusing.
+func (None) Author(context.Context, Request) (Response, error) {
 	return Response{}, errors.New("inference: this cell has no model runtime; it can verify and build but not attempt")
 }
