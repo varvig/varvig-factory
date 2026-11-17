@@ -109,6 +109,9 @@ type Fake struct {
 	Calls []string
 	// Committed records (dir, message) per commit.
 	Committed []string
+
+	// changes records parents + provenance per change id, for InspectChange.
+	changes map[string]ChangeInfo
 }
 
 type fakeTicket struct {
@@ -129,7 +132,22 @@ func NewFake(label string) *Fake {
 		artifacts: map[string][]string{},
 		pools:     map[string][]Proposal{},
 		hooks:     map[string][]func([]byte) HookResult{},
+		changes:   map[string]ChangeInfo{},
 	}
+}
+
+// SetChange records a change's parents and provenance so InspectChange can
+// return them. A change not set this way inspects as having no parents and no
+// provenance — the shape of a root change — which is the right default for the
+// many changes a test never needs to merge.
+func (f *Fake) SetChange(id, provenance string, parents ...string) {
+	f.changes[id] = ChangeInfo{Parents: parents, Provenance: provenance}
+}
+
+// InspectChange implements Varvig from the recorded change table.
+func (f *Fake) InspectChange(id string) (ChangeInfo, error) {
+	f.note("inspect-change " + id)
+	return f.changes[id], nil
 }
 
 func (f *Fake) note(call string) { f.Calls = append(f.Calls, call) }

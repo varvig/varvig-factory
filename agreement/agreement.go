@@ -35,7 +35,12 @@ type Observation struct {
 	Task  string `json:"task"`
 	// TopAttempt is the change the pool scored highest at promotion time.
 	TopAttempt string `json:"top_attempt"`
-	// PromotedAttempt is the change that was actually promoted.
+	// PromotedAttempt is the candidate the promotion resolved to: the promoted
+	// change itself in the ordinary case, or — when varvig landed the promotion by
+	// merging a candidate against a moved base — that candidate, which the caller
+	// resolves from the merge's ancestry before recording (core §10b item 3). This
+	// keeps Agreed a true identity comparison of what was scored against what was
+	// promoted, rather than reading every merge as a disagreement.
 	PromotedAttempt string `json:"promoted_attempt"`
 	Agreed          bool   `json:"agreed"`
 	ObservedAt      int64  `json:"observed_at"`
