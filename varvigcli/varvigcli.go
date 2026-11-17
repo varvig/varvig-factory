@@ -123,6 +123,20 @@ type Proposal struct {
 	Created int64   `json:"created"`
 }
 
+// ChangeInfo is the inspectable surface of a committed change: its parents and
+// the provenance it points at. Factory reads it to resolve a promoted change
+// back to the candidate it represents — a direct promotion is the candidate
+// itself, while a promotion that varvig landed by merging a stale proposal
+// against a moved base carries the candidate as a parent (core §10b item 3).
+// Without that resolution the agreement metric would read every merge as a
+// disagreement with the scorer.
+type ChangeInfo struct {
+	// Parents are the change's parent change ids, in varvig's order.
+	Parents []string
+	// Provenance is the id of the change's provenance object, or empty.
+	Provenance string
+}
+
 // Scope is a ticket's declared read and write set. Factory *reads* it and never
 // computes it: deciding a write set is scheduling, and that belongs to varvig
 // (CELL.md §10.1).
@@ -239,6 +253,10 @@ type Varvig interface {
 	Refs() ([]Ref, error)
 	// ResolveRef resolves one ref, or ErrNoRef.
 	ResolveRef(name string) (string, error)
+	// InspectChange returns a change's parents and provenance id. It is a read of
+	// an existing object, never a write; Factory uses it only to resolve a
+	// promoted change to the candidate it represents (see ChangeInfo).
+	InspectChange(id string) (ChangeInfo, error)
 	// UpdateRef sets a ref by compare-and-swap. An empty oldValue asserts the
 	// ref does not yet exist. A refused swap is ErrCAS.
 	UpdateRef(name, newValue, oldValue string) error
@@ -489,6 +507,35 @@ func (e Exec) ResolveRef(name string) (string, error) {
 		return "", fmt.Errorf("%w: %s", ErrNoRef, name)
 	}
 	return fields[0], nil
+}
+
+// InspectChange implements Varvig by parsing `varvig cat-object <id>` for a
+// change. The command prints one `tree` line, zero or more `parent <hex>` lines,
+// an optional `provenance <hex>` line, then author/timestamp and a blank line
+// before the free-form message — so parsing stops at the first blank line to
+// avoid reading a message that happens to begin with the word "parent".
+func (e Exec) InspectChange(id string) (ChangeInfo, error) {
+	out, err := e.run("cat-object", id)
+	if err != nil {
+		return ChangeInfo{}, err
+	}
+	var info ChangeInfo
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			break // the header ends; the message follows
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch fields[0] {
+		case "parent":
+			info.Parents = append(info.Parents, fields[1])
+		case "provenance":
+			info.Provenance = fields[1]
+		}
+	}
+	return info, nil
 }
 
 // UpdateRef implements Varvig. `varvig update-ref <name> <new> <old>` is silent

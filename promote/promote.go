@@ -476,13 +476,47 @@ func (p *Promoter) ObservePromotion(req Request) (agreement.Observation, error) 
 	if err != nil {
 		return agreement.Observation{}, err
 	}
-	obs := agreement.Observe(req.Scope, req.Ticket, top, promoted, p.now())
+	// Resolve the promoted change to the candidate it represents before comparing.
+	// varvig may land a promotion by merging a stale proposal against a moved base
+	// (core §10b item 3), which commits a new merge change whose id differs from
+	// the candidate the pool scored. Comparing raw ids would read that merge as a
+	// disagreement with the scorer — dragging the per-scope rate down for the one
+	// reason that has nothing to do with the scorer's calibration, and making
+	// autonomy *harder* to earn exactly when the merge machinery is working.
+	candidate := p.promotedCandidate(promoted, top)
+	obs := agreement.Observe(req.Scope, req.Ticket, top, candidate, p.now())
 	if err := agreement.Record(p.Project, req.TicketObject, obs); err != nil {
 		return obs, err
 	}
-	p.logf("agreement observed for %s: top=%s promoted=%s agreed=%t",
-		short(req.Ticket), short(top), short(promoted), obs.Agreed)
+	p.logf("agreement observed for %s: top=%s promoted=%s candidate=%s agreed=%t",
+		short(req.Ticket), short(top), short(promoted), short(candidate), obs.Agreed)
 	return obs, nil
+}
+
+// promotedCandidate maps the promoted change to the scored candidate it stands
+// for: the change itself when a candidate was promoted directly, or the top
+// candidate when varvig landed the promotion by merging that candidate against a
+// moved base — in which case the candidate is a parent of the merge change.
+//
+// It only ever resolves *toward the top candidate*: a promotion that is neither
+// the top candidate nor a merge carrying it forward is left unchanged, so a
+// genuine disagreement (a non-top candidate promoted, or a merge of one) still
+// reads as a disagreement. If the change cannot be inspected the raw id is
+// compared, which is no worse than before this resolution existed.
+func (p *Promoter) promotedCandidate(promoted, top string) string {
+	if promoted == top {
+		return promoted
+	}
+	info, err := p.Project.InspectChange(promoted)
+	if err != nil {
+		return promoted
+	}
+	for _, parent := range info.Parents {
+		if parent == top {
+			return top
+		}
+	}
+	return promoted
 }
 
 // topScoring returns the highest-scoring candidate. Only scored candidates
